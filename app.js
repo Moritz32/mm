@@ -1,5 +1,5 @@
 // M&M's · chat, trips, calls and memories for Moritz & Margaret
-import { SUPABASE_URL, SUPABASE_KEY, CALENDAR_FEED, CITIES } from "./config.js";
+import { SUPABASE_URL, SUPABASE_KEY, CALENDAR_FEED, CITIES, VAPID_PUBLIC } from "./config.js";
 import { wordOfTheDay } from "./words.js";
 
 const sb = window.__MM_FAKE__ ??
@@ -43,6 +43,7 @@ const PATHS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   dots: '<circle cx="5.5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18.5" cy="12" r="1.6" fill="currentColor"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/>',
+  bell: '<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
   book: '<path d="M5 4.5h11.5a1.5 1.5 0 0 1 1.5 1.5v14H7a2 2 0 0 1-2-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/><path d="M9 8.5h5"/>',
   speaker: '<path d="M4 9.5h3.5L12 6v12l-4.5-3.5H4z"/><path d="M15.5 9.3a3.8 3.8 0 0 1 0 5.4M18.2 6.8a7.5 7.5 0 0 1 0 10.4"/>',
   smile: '<circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.3a4.6 4.6 0 0 0 6.8 0"/><circle cx="9.3" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="14.7" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
@@ -277,6 +278,7 @@ async function start(session) {
     if (location.hash === "#drop") { const ph = tripPhase(); if (ph.kind === "countdown") celebrate(ph.days + 1, ph.days); }
     greetToday();
     seekOnOpen();
+    pushStart();
     shareLocation(false);
     if (!S.locTimer) S.locTimer = setInterval(() => shareLocation(false), 10 * MIN);
   } catch (e) {
@@ -1483,6 +1485,125 @@ function wishTime() {
   toast(`${d.getHours() === 11 ? "11:11" : "23:11"} · make a wish ✨`);
 }
 
+// ═══ Notifications ════════════════════════════════════════════════
+const PUSH_DEFAULTS = { messages: true, hearts: true, photos: true, calls: true, words: true, story: true, preview: true, quiet_from: null, quiet_to: null };
+const PUSH_TOPICS = [
+  ["messages", "Messages"], ["hearts", "Hearts"], ["photos", "Photos"],
+  ["calls", "Calls", "Suggestions and answers"], ["words", "New words", "When you're taught one"], ["story", "Trips and memories"],
+];
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const deviceName = () => (/iPhone/.test(navigator.userAgent) ? "this iPhone" : /iPad/.test(navigator.userAgent) ? "this iPad" : /Mac/.test(navigator.userAgent) ? "this Mac" : "this device");
+function pushStatusText() {
+  if (!pushSupported()) return /iPhone|iPad/.test(navigator.userAgent) ? "Open M&M's from your Home Screen to turn them on" : "Not available in this browser";
+  if (S.push?.endpoint) return `On for ${deviceName()}`;
+  return Notification.permission === "denied" ? "Blocked in your settings" : `Off on ${deviceName()}`;
+}
+const b64uBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+
+// Register the service worker and pick up this device's subscription
+async function pushStart() {
+  navigator.clearAppBadge?.().catch(() => {});
+  if (!pushSupported()) return;
+  try {
+    const reg = await navigator.serviceWorker.register("sw.js");
+    S.swReg = reg;
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub || Notification.permission !== "granted") return;
+    const { data } = await sb.from("push_subscriptions").select("*").eq("endpoint", sub.endpoint).maybeSingle();
+    const prefs = { ...PUSH_DEFAULTS, ...(data?.prefs || {}), tz: LOCAL_TZ };
+    await savePushSub(sub, prefs);
+    if (S.tab === "us") renderView();
+  } catch (e) { /* notifications are a bonus */ }
+}
+async function savePushSub(sub, prefs) {
+  const j = sub.toJSON();
+  const row = { endpoint: j.endpoint, name: S.me.name, p256dh: j.keys.p256dh, auth: j.keys.auth, prefs, user_agent: navigator.userAgent.slice(0, 200), updated_at: new Date().toISOString() };
+  const { error } = await sb.from("push_subscriptions").upsert(row);
+  if (error) throw error;
+  S.push = { endpoint: j.endpoint, prefs };
+}
+
+async function pushOn(btn) {
+  const msg = $("#push-msg");
+  const say = (t) => { if (msg) { msg.hidden = false; msg.textContent = t; } };
+  if (!pushSupported()) return say("On iPhone, add M&M's to your Home Screen and open it from there (iOS 16.4 or later).");
+  btn.disabled = true;
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { say("Notifications are blocked. Allow them in Settings → Notifications → M&M's."); return; }
+    const reg = S.swReg || (await navigator.serviceWorker.register("sw.js"));
+    await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(VAPID_PUBLIC) }));
+    await savePushSub(sub, { ...PUSH_DEFAULTS, tz: LOCAL_TZ });
+    openPushSheet();
+    renderView();
+    toast(`Notifications are on for ${deviceName()} ♥`);
+  } catch (e) {
+    console.error(e);
+    say("Couldn't turn them on. Check your connection and try again.");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function pushOff() {
+  try {
+    const reg = S.swReg || (await navigator.serviceWorker.getRegistration());
+    const sub = reg && (await reg.pushManager.getSubscription());
+    if (S.push?.endpoint) await sb.from("push_subscriptions").delete().eq("endpoint", S.push.endpoint);
+    if (sub) await sub.unsubscribe();
+  } catch (e) { /* already gone */ }
+  S.push = null;
+  closeSheet();
+  renderView();
+  toast(`Notifications are off on ${deviceName()}`);
+}
+
+let pushSaveTimer;
+function setPushPref(key, value) {
+  if (!S.push) return;
+  S.push.prefs = { ...S.push.prefs, [key]: value, tz: LOCAL_TZ };
+  clearTimeout(pushSaveTimer);
+  pushSaveTimer = setTimeout(async () => {
+    const { error } = await sb.from("push_subscriptions").update({ prefs: S.push.prefs, updated_at: new Date().toISOString() }).eq("endpoint", S.push.endpoint);
+    toast(error ? "Couldn't save. Check your connection." : "Saved");
+  }, 350);
+}
+
+async function pushTest(btn) {
+  btn.disabled = true;
+  const { error } = await sb.from("push_pings").insert({ name: S.me.name });
+  btn.disabled = false;
+  toast(error ? "Couldn't send the test. Check your connection." : "Test sent, it should arrive in a few seconds");
+}
+
+function openPushSheet() {
+  const on = !!S.push?.endpoint, p = { ...PUSH_DEFAULTS, ...(S.push?.prefs || {}) };
+  const quietOn = !!(p.quiet_from && p.quiet_to);
+  const sw = (key, label, sub, checked) => `<label class="switch-row"><span><b>${label}</b>${sub ? `<i>${sub}</i>` : ""}</span>
+    <input type="checkbox" role="switch" data-push-pref="${key}" ${checked ? "checked" : ""}><span class="switch" aria-hidden="true"></span></label>`;
+  openSheet(`
+    <h3>Notifications</h3>
+    <p class="muted" style="font-size:14px">${esc(pushStatusText())}. Each device has its own settings.</p>
+    ${on ? `
+      <div class="switches">
+        ${PUSH_TOPICS.map(([k, l, sub]) => sw(k, l, sub, p[k] !== false)).join("")}
+      </div>
+      <div class="switches">
+        ${sw("preview", "Show message text", "Off: “New message from …” on the lock screen", p.preview !== false)}
+        ${sw("quiet", "Quiet hours", "Nothing buzzes in this window, your time", quietOn)}
+        <div class="grid2" id="quiet-times" ${quietOn ? "" : "hidden"}>
+          <label class="f">From<input class="in" type="time" id="quiet-from" value="${esc(p.quiet_from || "23:00")}"></label>
+          <label class="f">Until<input class="in" type="time" id="quiet-to" value="${esc(p.quiet_to || "07:30")}"></label>
+        </div>
+      </div>
+      <button class="btn soft" data-act="push-test">${ico("bell")}Send a test notification</button>
+      <button class="btn ghost" data-act="push-off">Turn off on ${esc(deviceName())}</button>`
+    : `<div class="msg" id="push-msg" ${pushSupported() ? "hidden" : ""}>${pushSupported() ? "" : "On iPhone, add M&M's to your Home Screen and open it from there (iOS 16.4 or later). On a Mac, use Safari → File → Add to Dock."}</div>
+      ${pushSupported() ? `<button class="btn" data-act="push-on">${ico("bell")}Turn on for ${esc(deviceName())}</button>` : ""}`}
+    <button class="btn ghost" data-act="sheet-close">Close</button>`);
+}
+
 // ═══ Words: the word of the day and words you teach each other ═══
 const LANG_NAME = { en: "English", de: "German" };
 const LANG_VOICE = { en: "en-US", de: "de-DE" };
@@ -1932,6 +2053,12 @@ function viewUs() {
     ${standalone ? "" : `<div class="card install"><b>Put M&amp;M's on your Home Screen</b><p class="muted" style="font-size:14px">In Safari, tap the Share button, then <b>Add to Home Screen</b>. It then opens like a normal app.</p></div>`}
     <div class="sec-h"><h2>Our story</h2><button class="btn small" data-act="moment-new">${ico("plus")}Add memory</button></div>
     ${storyHTML()}
+    <div class="card notif-card">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <div class="notif-main">${ico("bell")}<div><b>Notifications</b><span>${esc(pushStatusText())}</span></div></div>
+        <button class="btn soft small" data-act="push-settings">Settings</button>
+      </div>
+    </div>
     <div class="foot"><span class="foot-me" data-act="secret-tap">Signed in as ${esc(S.me.name)}</span><button class="link" data-act="signout">Sign out</button></div>
   </div>`;
 }
@@ -2014,6 +2141,10 @@ document.addEventListener("click", async (e) => {
       case "reload": return location.reload();
       case "tab": return setTab(el.dataset.tab);
       case "send-heart": return await sendHeart();
+      case "push-settings": return openPushSheet();
+      case "push-on": return await pushOn(el);
+      case "push-off": return await pushOff();
+      case "push-test": return await pushTest(el);
       case "say": return speak(el.dataset.text, el.dataset.lang);
       case "word-share": return await shareWord();
       case "word-del": return await deleteWord(el);
@@ -2143,6 +2274,12 @@ document.addEventListener("change", (e) => {
   if (el.dataset.file === "moment" && el.files?.length) { S.momentFiles.push(...el.files); el.value = ""; renderMomentPhotos(); }
   if (el.dataset.file === "surprise" && el.files?.length) { S.spFile = el.files[0]; el.value = ""; renderSpPhoto(); }
   if (el.id === "sp-spot") renderSpExtra(el.value);
+  if (el.dataset.pushPref === "quiet") {
+    $("#quiet-times").hidden = !el.checked;
+    setPushPref("quiet_from", el.checked ? $("#quiet-from").value : null);
+    setPushPref("quiet_to", el.checked ? $("#quiet-to").value : null);
+  } else if (el.dataset.pushPref) setPushPref(el.dataset.pushPref, el.checked);
+  if ((el.id === "quiet-from" || el.id === "quiet-to") && el.value) setPushPref(el.id === "quiet-from" ? "quiet_from" : "quiet_to", el.value);
   if (el.id === "trip-traveler") {
     const note = $("#trip-tz-note");
     if (note) note.innerHTML = tzNote(el.value);
@@ -2183,6 +2320,7 @@ document.addEventListener("focusout", (e) => { if (e.target.id === "composer") S
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && S.started && S.me) {
     loadAll().then(() => { refresh("all"); checkDrop(); greetToday(); seekOnOpen(); }).catch(() => {});
+    navigator.clearAppBadge?.().catch(() => {});
     shareLocation(false);
   }
 });
