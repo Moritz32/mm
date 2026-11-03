@@ -706,10 +706,14 @@ async function loadEarlier() {
 }
 
 // ═══ Trips ═══════════════════════════════════════════════════════
-const destOf = (trip) => otherOf(trip.traveler) || S.partner;
+const BOTH = "Both";
+const isTogetherTime = (trip) => trip.traveler === BOTH; // a stretch in the same city, like the Munich summer
+const destOf = (trip) => (isTogetherTime(trip) ? S.me : otherOf(trip.traveler)) || S.partner;
+const tzFor = (traveler) => (traveler === BOTH ? S.me.tz : otherOf(traveler).tz);
 // "Margaret · Hamburg → Aix-en-Provence", or "Moritz flies to Boston" when nothing else is set
 function tripRoute(t) {
   const a = t.arrive_city || destOf(t).city, l = t.leave_city || a;
+  if (isTogetherTime(t)) return `Together · ${a === l ? a : `${a} → ${l}`}`;
   if (!t.arrive_city && !t.leave_city) return `${t.traveler} ${Date.parse(t.goodbye) > Date.now() ? "flies" : "flew"} to ${a}`;
   return `${t.traveler} · ${a === l ? a : `${a} → ${l}`}`;
 }
@@ -760,7 +764,7 @@ function viewTrip(trip) {
     <div class="card glow">
       <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(tripRoute(trip))}</span>${tripStatus(trip)}</div>
       <h2 style="font:800 24px/1.15 var(--round)">${esc(trip.title)}</h2>
-      <div class="trip-when">Together from <b>${fDay(r, tz)}, ${fTime(r, tz)}</b> ${esc(dest.city)} time${localNote(r)}</div>
+      <div class="trip-when">Together from <b>${fDay(r, tz)}, ${fTime(r, tz)}</b> ${esc(trip.arrive_city || dest.city)} time${localNote(r)}</div>
       <div class="trip-when">Until <b>${fDay(g, tz)}, ${fTime(g, tz)}</b>${localNote(g)}</div>
       ${trip.flights ? `<div class="flights">${esc(trip.flights)}</div>` : ""}
       <div class="row"><button class="btn soft small" data-act="trip-edit" data-id="${trip.id}">${ico("edit")}Edit trip</button></div>
@@ -846,7 +850,7 @@ function tripPacking(trip) {
 
 function openTripSheet(trip) {
   const traveler = trip?.traveler || S.me.name;
-  const dest = otherOf(traveler);
+  const dest = traveler === BOTH ? S.me : otherOf(traveler);
   const r = trip ? new Date(trip.reunion) : null, g = trip ? new Date(trip.goodbye) : null;
   openSheet(`
     <h3>${trip ? "Edit trip" : "New trip"}</h3>
@@ -855,9 +859,10 @@ function openTripSheet(trip) {
       <label class="f">Who's flying?
         <select class="in" id="trip-traveler" data-act-change="trip-traveler">
           ${S.members.map((m) => `<option value="${esc(m.name)}" ${m.name === traveler ? "selected" : ""}>${esc(m.name)} → ${esc(otherOf(m.name).city)}</option>`).join("")}
+          <option value="${BOTH}" ${traveler === BOTH ? "selected" : ""}>Nobody, we're in the same city</option>
         </select>
       </label>
-      <p class="muted" id="trip-tz-note" style="font-size:14px">Enter both times in <b>${esc(dest.city)}</b> time.</p>
+      <p class="muted" id="trip-tz-note" style="font-size:14px">${tzNote(traveler)}</p>
       <div class="grid2">
         <label class="f">Together from<input class="in" id="trip-r-date" type="date" required value="${r ? toDateInput(r, dest.tz) : ""}"></label>
         <label class="f">at<input class="in" id="trip-r-time" type="time" required value="${r ? toTimeInput(r, dest.tz) : ""}"></label>
@@ -876,9 +881,13 @@ function openTripSheet(trip) {
     </form>`);
 }
 
+function tzNote(traveler) {
+  return traveler === BOTH ? "Enter both times in <b>your</b> time." : `Enter both times in <b>${esc(otherOf(traveler).city)}</b> time.`;
+}
+
 async function saveTrip(form) {
   const traveler = $("#trip-traveler").value;
-  const tz = otherOf(traveler).tz;
+  const tz = tzFor(traveler);
   const reunion = fromInputs($("#trip-r-date").value, $("#trip-r-time").value, tz);
   const goodbye = fromInputs($("#trip-g-date").value, $("#trip-g-time").value, tz);
   const title = $("#trip-title").value.trim();
@@ -1717,19 +1726,26 @@ function storyHTML() {
       const future = now < r, together = r <= now && now < g;
       const who = t.traveler === S.me.name ? "You" : esc(t.traveler);
       const timeOf = (iso) => (t.flights ? ` · ${fTime(new Date(iso), tz)}` : "");
+      const shared = isTogetherTime(t);
+      const arriveText = shared
+        ? `Our time in ${esc(arriveCity(t))} ${now < r ? "begins" : "began"}`
+        : `${who} ${now < r ? (who === "You" ? "land" : "lands") : (who === "You" ? "landed" : "arrived")} in ${esc(arriveCity(t))}${timeOf(t.reunion)}`;
       const steps = [
-        { date: start, cls: "arrive", body: `<b>${who} ${now < r ? (who === "You" ? "land" : "lands") : (who === "You" ? "landed" : "arrived")} in ${esc(arriveCity(t))}${timeOf(t.reunion)}</b>` },
+        // a together-time block opens with its first memory when there is one that day (like the day you met)
+        ...(shared && events.some((ev) => ev.date === start) ? [] : [{ date: start, cls: "arrive", body: `<b>${arriveText}</b>` }]),
         ...events.slice().sort((a, b) => a.date.localeCompare(b.date)).map((ev) => ({ date: ev.date, cls: evClass(ev), body: eventBody(ev) })),
       ];
       if (together) { const ph = tripPhase(); steps.push({ date: today, cls: "now", body: `<b>Today · day ${ph.day} of ${ph.total}</b>` }); }
       steps.sort((a, b) => a.date.localeCompare(b.date) || (a.cls === "arrive" ? -1 : b.cls === "arrive" ? 1 : 0));
-      steps.push({ date: end, cls: "leave", body: `<b>${who} ${now < g ? (who === "You" ? "fly" : "flies") : "flew"} home from ${esc(leaveCity(t))}${timeOf(t.goodbye)}</b>` });
+      steps.push({ date: end, cls: "leave", body: shared
+        ? `<b>Last day together in ${esc(leaveCity(t))}</b>`
+        : `<b>${who} ${now < g ? (who === "You" ? "fly" : "flies") : "flew"} home from ${esc(leaveCity(t))}${timeOf(t.goodbye)}</b>` });
       const route = arriveCity(t) === leaveCity(t) ? esc(arriveCity(t)) : `${esc(arriveCity(t))} → ${esc(leaveCity(t))}`;
       html += `<div class="tl-trip ${future ? "future" : ""} ${together ? "together" : ""}">
         <div class="trip-head">
           <div class="tl-date">${future ? "Coming up · " : ""}${esc(tripWhen(t))}</div>
-          <div class="tl-title"><h3>${ico("plane")} ${esc(t.title)}</h3></div>
-          <div class="trip-meta">${esc(visitLabel(t))} · ${route}</div>
+          <div class="tl-title"><h3>${ico(shared ? "heart" : "plane")} ${esc(t.title)}</h3></div>
+          <div class="trip-meta">${shared ? `Together every day · ${route}` : `${esc(visitLabel(t))} · ${route}`}</div>
           <div class="row">${tripStatus(t)}<button class="link" data-act="trip-open" data-id="${t.id}" data-go="1">Open trip</button></div>
         </div>
         <ol class="trip-steps">${steps.map((st) => `<li class="step ${st.cls}"><span class="step-date">${shortDay(st.date)}</span>${st.body}</li>`).join("")}</ol>
@@ -1982,7 +1998,7 @@ document.addEventListener("change", (e) => {
   if (el.id === "sp-spot") renderSpExtra(el.value);
   if (el.id === "trip-traveler") {
     const note = $("#trip-tz-note");
-    if (note) note.innerHTML = `Enter both times in <b>${esc(otherOf(el.value).city)}</b> time.`;
+    if (note) note.innerHTML = tzNote(el.value);
   }
 });
 
