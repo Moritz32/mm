@@ -67,7 +67,7 @@ main.chat-mode { overflow: hidden; display: flex; flex-direction: column; }
 .page > * { min-width: 0; }
 
 .tabs {
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   background: rgba(14, 15, 34, 0.96);
   border-top: 1px solid var(--line);
   padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 6px) max(8px, env(safe-area-inset-left, 0px));
@@ -437,3 +437,28 @@ body[data-theme="love"] .top { background: linear-gradient(135deg, #2A1240 0%, #
 .tl-now b { font: 800 16px/1.3 var(--round); }
 @keyframes now-pulse { 50% { box-shadow: 0 0 0 8px rgba(143, 227, 176, 0); } }
 @media (prefers-reduced-motion: reduce) { .tl-now::before { animation: none; } }
+
+/* ── Words ──────────────────────────────────── */
+.word-card { background: linear-gradient(150deg, var(--night) 0%, var(--plum) 70%, #9C4C80 100%); border-color: transparent; gap: 8px; }
+.word-card .word { font: 900 clamp(30px, 9vw, 40px)/1.05 var(--round); overflow-wrap: anywhere; }
+.word-card .meaning { font: 700 18px/1.35 var(--round); color: rgba(255, 255, 255, 0.92); }
+.word-card .example { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 2px 8px; padding: 10px 12px; border-radius: 14px; background: rgba(0, 0, 0, 0.18); }
+.word-card .example p { font: 600 15px/1.4 var(--round); font-style: italic; grid-column: 1; }
+.word-card .example .tr { font-style: normal; color: rgba(255, 255, 255, 0.7); font-size: 14px; }
+.word-card .example .say { grid-column: 2; grid-row: 1 / span 2; }
+.word-card .chip { justify-self: start; }
+.word-card .chip svg { width: 13px; height: 13px; }
+.icon-btn.say { color: var(--pink); background: rgba(255, 158, 184, 0.12); }
+.word-card .icon-btn.say { color: #fff; background: rgba(255, 255, 255, 0.14); }
+.theirs { font-size: 14px; padding: 0 4px; }
+.theirs b { color: var(--ink); }
+.word-list { gap: 0; padding: 4px 14px; }
+.word-row { display: flex; align-items: center; gap: 6px; padding: 10px 0; border-top: 1px solid var(--line); }
+.word-row:first-child { border-top: 0; }
+.word-row .grow { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+.word-row b { font: 800 16px/1.3 var(--round); overflow-wrap: anywhere; }
+.word-row span { font-size: 14px; color: var(--muted); }
+.word-row i { font-size: 13.5px; color: var(--faint); }
+.tabs .tab span { white-space: nowrap; }
+.bubble.emoji.beat { display: inline-block; animation: beat 1.3s ease-in-out 3; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .bubble.emoji.beat { animation: none; } }

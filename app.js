@@ -1,5 +1,6 @@
 // M&M's · chat, trips, calls and memories for Moritz & Margaret
 import { SUPABASE_URL, SUPABASE_KEY, CALENDAR_FEED, CITIES } from "./config.js";
+import { wordOfTheDay } from "./words.js";
 
 const sb = window.__MM_FAKE__ ??
   (await import("https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm")).createClient(SUPABASE_URL, SUPABASE_KEY, {
@@ -42,6 +43,8 @@ const PATHS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   dots: '<circle cx="5.5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18.5" cy="12" r="1.6" fill="currentColor"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/>',
+  book: '<path d="M5 4.5h11.5a1.5 1.5 0 0 1 1.5 1.5v14H7a2 2 0 0 1-2-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/><path d="M9 8.5h5"/>',
+  speaker: '<path d="M4 9.5h3.5L12 6v12l-4.5-3.5H4z"/><path d="M15.5 9.3a3.8 3.8 0 0 1 0 5.4M18.2 6.8a7.5 7.5 0 0 1 0 10.4"/>',
   smile: '<circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.3a4.6 4.6 0 0 0 6.8 0"/><circle cx="9.3" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="14.7" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
   photo: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="9" cy="10" r="1.8"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/>',
 };
@@ -107,14 +110,14 @@ const toTimeInput = (d, tz) => { const p = zoneParts(d, tz); return `${String(p.
 const S = {
   started: false, me: null, partner: null, members: [],
   posts: [], reactions: [], more: false, msgCount: 0,
-  trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [],
+  trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], words: [],
   tab: tabFromHash(), tripId: null, tripSub: "plan", packOwner: null,
   urls: new Map(), uploading: 0, channel: null, prefill: null,
 };
 const KEYS = {
   posts: (r) => r.id, reactions: (r) => `${r.post_id}|${r.author}`, trip_days: (r) => `${r.trip_id}|${r.day}`,
   trips: (r) => r.id, ideas: (r) => r.id, packing: (r) => r.id, availability: (r) => r.id, calls: (r) => r.id, moments: (r) => r.id,
-  locations: (r) => r.name, surprises: (r) => r.id,
+  locations: (r) => r.name, surprises: (r) => r.id, words: (r) => r.id,
 };
 const SORTS = {
   posts: (a, b) => a.created_at.localeCompare(b.created_at),
@@ -124,6 +127,7 @@ const SORTS = {
   ideas: (a, b) => a.created_at.localeCompare(b.created_at),
   packing: (a, b) => a.created_at.localeCompare(b.created_at),
   surprises: (a, b) => a.created_at.localeCompare(b.created_at),
+  words: (a, b) => a.created_at.localeCompare(b.created_at),
 };
 function upsertRow(t, row) {
   if (!row) return;
@@ -159,7 +163,7 @@ async function run(query, failMsg = "Couldn't save. Check your connection and tr
 // ═══ Start-up and login ══════════════════════════════════════════
 function tabFromHash() {
   const t = location.hash.replace("#", "");
-  return ["chat", "trips", "calls", "us"].includes(t) ? t : "chat";
+  return ["chat", "trips", "calls", "words", "us"].includes(t) ? t : "chat";
 }
 
 async function boot() {
@@ -283,11 +287,11 @@ async function start(session) {
 
 function stop() {
   if (S.channel) sb.removeChannel(S.channel);
-  Object.assign(S, { started: false, channel: null, me: null, partner: null, posts: [], reactions: [], trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], tripId: null, dropSeen: null });
+  Object.assign(S, { started: false, channel: null, me: null, partner: null, posts: [], reactions: [], trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], words: [], tripId: null, dropSeen: null });
 }
 
 async function loadAll() {
-  const [posts, trips, days, ideas, packing, availability, calls, moments, count, locations, surprises] = await Promise.all([
+  const [posts, trips, days, ideas, packing, availability, calls, moments, count, locations, surprises, words] = await Promise.all([
     run(sb.from("posts").select("*").order("created_at", { ascending: false }).limit(PAGE)),
     run(sb.from("trips").select("*").order("reunion")),
     run(sb.from("trip_days").select("*")),
@@ -299,10 +303,11 @@ async function loadAll() {
     sb.from("posts").select("id", { count: "exact", head: true }).eq("kind", "note"),
     sb.from("locations").select("*").then((r) => r.data || []),
     sb.from("surprises").select("*").then((r) => r.data || [], () => []),
+    sb.from("words").select("*").order("created_at").then((r) => r.data || [], () => []),
   ]);
   S.posts = posts.slice().reverse();
   S.more = posts.length === PAGE;
-  Object.assign(S, { trips, trip_days: days, ideas, packing, availability, calls, moments, locations, surprises });
+  Object.assign(S, { trips, trip_days: days, ideas, packing, availability, calls, moments, locations, surprises, words });
   S.msgCount = count?.count ?? posts.filter((p) => p.kind === "note").length;
   S.reactions = posts.length ? await run(sb.from("reactions").select("*").in("post_id", posts.map((p) => p.id))) : [];
 }
@@ -312,7 +317,7 @@ function subscribe() {
   for (const t of Object.keys(KEYS)) {
     ch.on("postgres_changes", { event: "*", schema: "public", table: t }, (p) => {
       if (t === "surprises" && p.eventType === "UPDATE") noticeFound(p.new);
-      if (t === "posts" && p.eventType === "INSERT" && p.new.author !== S.me?.name && p.new.kind === "note" && !S.posts.some((x) => x.id === p.new.id)) builtInEggs(p.new.body);
+      if (t === "posts" && p.eventType === "INSERT" && p.new.author !== S.me?.name && p.new.kind === "note" && !S.posts.some((x) => x.id === p.new.id)) builtInEggs(p.new.body, false);
       if (p.eventType === "DELETE") removeRow(t, p.old);
       else upsertRow(t, p.new);
       refresh(t);
@@ -339,7 +344,7 @@ function renderShell() {
     <header class="top" id="top"></header>
     <main id="view"></main>
     <nav class="tabs" aria-label="Sections">
-      ${[["chat", "Chat", "chat"], ["trips", "Trips", "plane"], ["calls", "Calls", "phone"], ["us", "Us", "us"]].map(([id, label, icon]) =>
+      ${[["chat", "Chat", "chat"], ["trips", "Trips", "plane"], ["calls", "Calls", "phone"], ["words", "Words", "book"], ["us", "Us", "us"]].map(([id, label, icon]) =>
         `<button class="tab" data-act="tab" data-tab="${id}" ${S.tab === id ? 'aria-current="page"' : ""}>${ico(icon)}<span>${label}</span></button>`).join("")}
     </nav>`;
   renderHeader();
@@ -390,6 +395,7 @@ const clock = () => fmt(new Date(), S.partner.tz, { hour: "2-digit", minute: "2-
 
 function tick() {
   checkDrop();
+  wishTime();
   const c = $("#partner-clock");
   if (c) c.textContent = clock();
   renderHeader();
@@ -402,7 +408,7 @@ function renderView() {
   view.classList.toggle("chat-mode", S.tab === "chat");
   if (S.tab === "chat") return viewChat(view);
   preserve(view, () => {
-    view.innerHTML = { trips: viewTrips, calls: viewCalls, us: viewUs }[S.tab]();
+    view.innerHTML = { trips: viewTrips, calls: viewCalls, words: viewWords, us: viewUs }[S.tab]();
   });
   hydratePhotos(view);
   if (S.tab === "calls") updateCallPreview();
@@ -560,7 +566,7 @@ function msgHTML(p) {
     : "";
   const body = p.kind === "photo"
     ? `<div class="bubble photo" data-press="${p.id}"><img data-path="${esc(p.body)}" alt="Photo from ${who}" data-zoom="${esc(p.body)}"></div>`
-    : `<div class="bubble${emojiOnly(p.body) ? ` emoji n${emojiOnly(p.body)}` : ""}" data-press="${p.id}">${esc(p.body)}</div>`;
+    : `<div class="bubble${emojiOnly(p.body) ? ` emoji n${emojiOnly(p.body)}${/^[\s❤️♥️💖💗💓💕💞💘🩷]+$/u.test(p.body) ? " beat" : ""}` : ""}" data-press="${p.id}">${esc(p.body)}</div>`;
   return `<div class="m ${mine ? "mine" : ""}">${body}${reactHTML}<div class="meta">${time}</div></div>`;
 }
 
@@ -659,7 +665,7 @@ async function sendNote() {
     const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "note", body }).select().single(), "Couldn't send. Check your connection and try again.");
     upsertRow("posts", row);
     renderMsgs(true);
-    seek("word", body).then((found) => { if (!found) builtInEggs(body); });
+    seek("word", body).then((found) => { if (!found) builtInEggs(body, true); });
   } catch (e) {
     ta.value = body;
     autosize(ta);
@@ -1428,15 +1434,152 @@ function rain(sym, count = 24, mode = "fall") {
 
 // Little things that happen without being announced
 const LOVE_WORDS = /(^|[^\p{L}])(i love you|love you|ich liebe dich|hab dich lieb|je t['’]?aime|te amo|ti amo)($|[^\p{L}])/iu;
-function builtInEggs(text) {
-  const t = String(text || "");
-  if (/(^|[^\p{L}])paris($|[^\p{L}])/iu.test(t)) {
+const word = (w) => new RegExp(`(^|[^\\p{L}])(${w})($|[^\\p{L}])`, "iu");
+const EGGS = [
+  // using the word of the day, or a word your partner taught you, in your own message
+  { mine: true, test: (t) => usedWord(t), run: (t) => { const w = usedWord(t); rain(["✨", "📖"], 16, "up"); toast(w.from ? `📖 ${w.from} taught you “${w.word}” ♥` : `📖 Nice, today's word: “${w.word}”`); } },
+  { test: (t) => word("paris").test(t), run: () => {
     rain(["💋", "🗼", "♥"], 21, "up");
     const k = S.moments.find((m) => m.kind === "kiss");
     if (k) toast(`${k.title} · ${fDate(new Date(k.happened_on + "T12:00:00"))} ♥`);
-  } else if (LOVE_WORDS.test(t)) {
-    rain("♥", 28);
-  }
+  } },
+  { test: (t) => word("munich|münchen|muenchen").test(t), run: () => {
+    rain(["🥨", "🍺", "♥"], 18, "up");
+    const met = S.moments.find((m) => m.kind === "met");
+    if (met) toast(`Where it all began · ${fDate(new Date(met.happened_on + "T12:00:00"))} ♥`);
+  } },
+  { test: (t) => word("boston").test(t), run: () => {
+    rain(["🦆", "🦞", "☕"], 18, "up");
+    const ph = tripPhase();
+    if (ph.kind === "countdown") toast(`${plural(ph.days, "day")} to go ✈️`);
+  } },
+  { test: (t) => word("helau|alaaf").test(t), run: () => rain(["🎭", "🎉", "🎊"], 26) },
+  { test: (t) => word("prost|cheers|santé|sante|zum wohl").test(t), run: () => rain(["🍻", "🥂"], 14, "up") },
+  { test: (t) => /(^|[^\p{L}])m ?& ?m'?s?($|[^\p{L}])/iu.test(t), run: () => rain(["🔴", "🟡", "🟢", "🔵", "🟠", "🟤"], 36) },
+  { test: (t) => /miss you|vermisse dich|fehlst mir|tu me manques/iu.test(t), run: () => {
+    rain("♥", 14, "up");
+    const d = distance(), ph = tripPhase();
+    if (d && !d.together) toast(`${d.value.toLocaleString()} ${d.unit} apart${ph.kind === "countdown" ? `, only ${plural(ph.days, "day")} to go` : ""} ♥`);
+  } },
+  { test: (t) => /good ?night|gute nacht|bonne nuit|schlaf gut|sleep well|nighty/iu.test(t), when: () => { const h = new Date().getHours(); return h >= 20 || h < 4; }, run: () => rain(["🌙", "✨", "⭐"], 18) },
+  { test: (t) => /good ?morning|guten morgen|bonjour|morgen ☀|^gm\b/iu.test(t), when: () => { const h = new Date().getHours(); return h >= 4 && h < 12; }, run: () => rain(["☀️", "🌤️", "☕"], 14, "up") },
+  { test: (t) => /kiss|kuss|küsschen|bisou|😘|💋/iu.test(t), run: () => rain(["💋", "😘"], 20) },
+  { test: (t) => LOVE_WORDS.test(t), run: () => rain("♥", 28) },
+];
+// The first little thing that fits a message happens; nothing is announced beforehand
+function builtInEggs(text, mine = false) {
+  const t = String(text || "");
+  const egg = EGGS.find((e) => (!e.mine || mine) && e.test(t) && (!e.when || e.when()));
+  if (egg) egg.run(t);
+}
+
+// 11:11 · make a wish (once per day, morning or evening, when the app is open)
+function wishTime() {
+  const d = new Date();
+  if (d.getMinutes() !== 11 || (d.getHours() !== 11 && d.getHours() !== 23)) return;
+  const key = `mm-wish-${dayKey(d)}-${d.getHours()}`;
+  try { if (localStorage.getItem(key)) return; localStorage.setItem(key, "1"); } catch (e) { if (S.wished === key) return; S.wished = key; }
+  rain(["✨", "⭐"], 14, "up");
+  toast(`${d.getHours() === 11 ? "11:11" : "23:11"} · make a wish ✨`);
+}
+
+// ═══ Words: the word of the day and words you teach each other ═══
+const LANG_NAME = { en: "English", de: "German" };
+const LANG_VOICE = { en: "en-US", de: "de-DE" };
+const taughtFor = (name) => S.words.filter((w) => w.for_name === name).map((w) => ({ ...w, day: dayKey(new Date(w.created_at)) }));
+function todaysWord(name, key = dayKey(new Date())) {
+  const m = member(name);
+  return m && m.learns ? wordOfTheDay(key, m.learns, taughtFor(name)) : null;
+}
+// today's word or one your partner taught you, if this message of yours uses it
+function usedWord(text) {
+  if (!S.me) return null;
+  const t = ` ${String(text).toLowerCase().replace(/[^\p{L}\p{N}']+/gu, " ").trim()} `;
+  const has = (w) => { const k = String(w).toLowerCase().replace(/^(der|die|das) /, "").replace(/[^\p{L}\p{N}']+/gu, " ").trim(); return k.length > 2 && t.includes(` ${k} `); };
+  const today = todaysWord(S.me.name);
+  if (today && has(today.word)) return today;
+  const taught = S.words.find((w) => w.for_name === S.me.name && has(w.word));
+  return taught ? { word: taught.word, from: taught.added_by } : null;
+}
+function speak(text, lang) {
+  try {
+    if (!("speechSynthesis" in window)) return toast("Your browser can't read words aloud.");
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = LANG_VOICE[lang] || "en-US";
+    u.rate = lang === "de" ? 0.85 : 0.95;
+    speechSynthesis.speak(u);
+  } catch (e) { /* no voice available */ }
+}
+const sayBtn = (text, lang, label = "Listen") => `<button type="button" class="icon-btn say" data-act="say" data-text="${esc(text)}" data-lang="${lang}" aria-label="${esc(label)}">${ico("speaker")}</button>`;
+
+function viewWords() {
+  const me = S.me, partner = S.partner;
+  const w = todaysWord(me.name);
+  const theirs = todaysWord(partner.name);
+  const header = (lang) => (lang === "de" ? "Wort des Tages" : "Word of the day");
+  const card = w ? `<div class="card word-card">
+      <div class="row" style="justify-content:space-between"><span class="eyebrow">${header(w.lang)} · ${LANG_NAME[w.lang]}</span>${sayBtn(w.word, w.lang, `Listen to ${w.word}`)}</div>
+      <h2 class="word">${esc(w.word)}</h2>
+      <p class="meaning">${esc(w.meaning)}</p>
+      ${w.example ? `<div class="example"><p>“${esc(w.example)}”</p>${w.translation ? `<p class="tr">${esc(w.translation)}</p>` : ""}${sayBtn(w.example, w.lang, "Listen to the example")}</div>` : ""}
+      ${w.from ? `<span class="chip pink">${ico("heart")}Taught by ${esc(w.from)}</span>` : ""}
+      <div class="row"><button class="btn soft small" data-act="word-share">${ico("chat")}Share in the chat</button></div>
+    </div>` : `<div class="card empty">${ico("book")}<b>No word yet</b></div>`;
+  const recent = Array.from({ length: 7 }, (_, i) => todaysWord(me.name, dayKey(new Date(Date.now() - (i + 1) * DAY)))).filter(Boolean);
+  const fromPartner = S.words.filter((x) => x.for_name === me.name).slice().reverse();
+  const toPartner = S.words.filter((x) => x.for_name === partner.name).slice().reverse();
+  const pl = partner.learns, isDe = pl === "de";
+  const row = (x, lang, canDelete) => `<div class="word-row">
+      <div class="grow"><b>${esc(x.word)}</b><span>${esc(x.meaning)}</span>${x.example ? `<i>${esc(x.example)}</i>` : ""}</div>
+      ${sayBtn(x.word, lang, `Listen to ${x.word}`)}
+      ${canDelete ? `<button class="icon-btn" data-act="word-del" data-id="${x.id}" aria-label="Remove ${esc(x.word)}">${ico("trash")}</button>` : ""}
+    </div>`;
+  return `<div class="page">
+    ${card}
+    ${theirs ? `<p class="muted theirs">${esc(partner.name)}'s word today: <b>${esc(theirs.word)}</b> · ${esc(theirs.meaning)}</p>` : ""}
+    ${pl ? `<form class="card form" data-form="teach">
+      <h3>Teach ${esc(partner.name)} a word</h3>
+      <p class="muted" style="font-size:14px">It becomes ${esc(partner.name)}'s word of the day, starting today.</p>
+      <label class="f">${isDe ? "German word or phrase" : "English word or phrase"}<input class="in" id="teach-word" maxlength="60" autocomplete="off" placeholder="${isDe ? "die Sehnsucht" : "heinous"}"></label>
+      <label class="f">${isDe ? "What it means in English" : "What it means"}<input class="in" id="teach-meaning" maxlength="300" autocomplete="off" placeholder="${isDe ? "longing" : "utterly wicked; shockingly evil"}"></label>
+      <label class="f">Example (optional)<input class="in" id="teach-example" maxlength="300" autocomplete="off" placeholder="${isDe ? "Ich habe Sehnsucht nach dir." : "A heinous crime."}"></label>
+      <div class="msg bad" id="teach-msg" hidden></div>
+      <button class="btn" type="submit">${ico("plus")}Add to ${esc(partner.name)}'s words</button>
+    </form>` : ""}
+    ${recent.length ? `<div class="sec-h"><h2>Your last week</h2></div><div class="card word-list">${recent.map((x) => row(x, x.lang, false)).join("")}</div>` : ""}
+    <div class="sec-h"><h2>Words from ${esc(partner.name)}</h2><span class="muted">${fromPartner.length}</span></div>
+    ${fromPartner.length ? `<div class="card word-list">${fromPartner.map((x) => row(x, x.lang, true)).join("")}</div>` : `<p class="muted">When ${esc(partner.name)} teaches you a word, it shows up here.</p>`}
+    ${toPartner.length ? `<div class="sec-h"><h2>Words you taught ${esc(partner.name)}</h2><span class="muted">${toPartner.length}</span></div><div class="card word-list">${toPartner.map((x) => row(x, x.lang, true)).join("")}</div>` : ""}
+  </div>`;
+}
+
+async function teachWord() {
+  const word = $("#teach-word").value.trim(), meaning = $("#teach-meaning").value.trim(), example = $("#teach-example").value.trim();
+  const msg = $("#teach-msg");
+  if (!word || !meaning) { msg.hidden = false; msg.textContent = "Add the word and what it means."; return; }
+  const row = await run(sb.from("words").insert({ lang: S.partner.learns, word, meaning, example: example || null, for_name: S.partner.name, added_by: S.me.name }).select().single(), "Couldn't add the word. Check your connection.");
+  upsertRow("words", row);
+  ["#teach-word", "#teach-meaning", "#teach-example"].forEach((id) => { $(id).value = ""; delete $(id).dataset.dirty; });
+  renderView();
+  toast(`Added to ${S.partner.name}'s words ♥`);
+}
+
+async function shareWord() {
+  const w = todaysWord(S.me.name);
+  if (!w) return;
+  const body = `📖 ${w.lang === "de" ? "Wort des Tages" : "Word of the day"}: ${w.word} · ${w.meaning}`;
+  const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "note", body }).select().single(), "Couldn't share it. Check your connection.");
+  upsertRow("posts", row);
+  toast("Shared in the chat");
+}
+
+async function deleteWord(btn) {
+  if (!btn.dataset.sure) { btn.dataset.sure = "1"; btn.classList.add("sure"); toast("Tap the bin again to remove it"); return; }
+  const id = btn.dataset.id;
+  await run(sb.from("words").delete().eq("id", id), "Couldn't remove it. Check your connection.");
+  removeRow("words", { id });
+  renderView();
 }
 
 // ═══ Surprises: hidden by one of you, found by the other ═════════
@@ -1871,6 +2014,9 @@ document.addEventListener("click", async (e) => {
       case "reload": return location.reload();
       case "tab": return setTab(el.dataset.tab);
       case "send-heart": return await sendHeart();
+      case "say": return speak(el.dataset.text, el.dataset.lang);
+      case "word-share": return await shareWord();
+      case "word-del": return await deleteWord(el);
       case "emoji-panel": return toggleEmojiPanel();
       case "emoji-add": return addEmoji(el.dataset.emoji);
       case "heart-tap": return heartTap(el);
@@ -1954,6 +2100,7 @@ document.addEventListener("submit", async (e) => {
       case "avail": return await saveAvail();
       case "moment": return await saveMoment(form);
       case "surprise": return await saveSurprise(form);
+      case "teach": return await teachWord();
       case "idea": {
         const text = $("#idea-text").value.trim();
         if (!text) return;
