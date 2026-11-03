@@ -1,0 +1,16 @@
+{
+  "name": "M&M's",
+  "short_name": "M&M's",
+  "description": "Moritz & Margaret: chat, trips, calls and memories.",
+  "start_url": "./#chat",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0E0F22",
+  "theme_color": "#0E0F22",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
