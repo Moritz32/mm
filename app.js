@@ -707,6 +707,12 @@ async function loadEarlier() {
 
 // ═══ Trips ═══════════════════════════════════════════════════════
 const destOf = (trip) => otherOf(trip.traveler) || S.partner;
+// "Margaret · Hamburg → Aix-en-Provence", or "Moritz flies to Boston" when nothing else is set
+function tripRoute(t) {
+  const a = t.arrive_city || destOf(t).city, l = t.leave_city || a;
+  if (!t.arrive_city && !t.leave_city) return `${t.traveler} ${Date.parse(t.goodbye) > Date.now() ? "flies" : "flew"} to ${a}`;
+  return `${t.traveler} · ${a === l ? a : `${a} → ${l}`}`;
+}
 
 function tripWhen(trip) {
   const tz = destOf(trip).tz, r = new Date(trip.reunion), g = new Date(trip.goodbye);
@@ -731,7 +737,7 @@ function viewTrips() {
     const ideas = S.ideas.filter((x) => x.trip_id === t.id).length;
     const planned = S.trip_days.filter((x) => x.trip_id === t.id && x.plan.trim()).length;
     return `<button class="trip-card ${i === 0 && Date.parse(t.goodbye) > now ? "next" : ""}" data-act="trip-open" data-id="${t.id}">
-      <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(t.traveler)} flies to ${esc(destOf(t).city)}</span>${tripStatus(t)}</div>
+      <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(tripRoute(t))}</span>${tripStatus(t)}</div>
       <h3>${esc(t.title)}</h3>
       <div class="trip-when">${esc(tripWhen(t))}</div>
       <div class="trip-when">${plural(planned, "day")} planned · ${plural(ideas, "idea")}</div>
@@ -752,7 +758,7 @@ function viewTrip(trip) {
   return `<div class="page">
     <button class="back" data-act="trip-back">${ico("back")}Trips</button>
     <div class="card glow">
-      <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(trip.traveler)} flies to ${esc(dest.city)}</span>${tripStatus(trip)}</div>
+      <div class="row" style="justify-content:space-between"><span class="eyebrow">${esc(tripRoute(trip))}</span>${tripStatus(trip)}</div>
       <h2 style="font:800 24px/1.15 var(--round)">${esc(trip.title)}</h2>
       <div class="trip-when">Together from <b>${fDay(r, tz)}, ${fTime(r, tz)}</b> ${esc(dest.city)} time${localNote(r)}</div>
       <div class="trip-when">Until <b>${fDay(g, tz)}, ${fTime(g, tz)}</b>${localNote(g)}</div>
@@ -858,6 +864,10 @@ function openTripSheet(trip) {
         <label class="f">Until<input class="in" id="trip-g-date" type="date" required value="${g ? toDateInput(g, dest.tz) : ""}"></label>
         <label class="f">at<input class="in" id="trip-g-time" type="time" required value="${g ? toTimeInput(g, dest.tz) : ""}"></label>
       </div>
+      <div class="grid2">
+        <label class="f">Arriving in (optional)<input class="in" id="trip-arrive" maxlength="60" placeholder="${esc(dest.city)}" value="${esc(trip?.arrive_city || "")}"></label>
+        <label class="f">Leaving from (optional)<input class="in" id="trip-leave" maxlength="60" placeholder="${esc(dest.city)}" value="${esc(trip?.leave_city || "")}"></label>
+      </div>
       <label class="f">Flights (optional)<textarea class="in" id="trip-flights" rows="3" maxlength="2000" placeholder="EI 107 DUB 16:35 → JFK 19:29">${esc(trip?.flights || "")}</textarea></label>
       <div class="msg bad" id="trip-msg" hidden></div>
       <button class="btn" type="submit">Save trip</button>
@@ -877,7 +887,10 @@ async function saveTrip(form) {
   if (!title) return bad("Give the trip a name.");
   if (!reunion || !goodbye) return bad("Fill in both dates and times.");
   if (goodbye <= reunion) return bad("The end needs to be after the start.");
-  const row = { title, traveler, reunion: reunion.toISOString(), goodbye: goodbye.toISOString(), flights: $("#trip-flights").value.trim() || null };
+  const row = {
+    title, traveler, reunion: reunion.toISOString(), goodbye: goodbye.toISOString(), flights: $("#trip-flights").value.trim() || null,
+    arrive_city: $("#trip-arrive").value.trim() || null, leave_city: $("#trip-leave").value.trim() || null,
+  };
   const id = form.dataset.id;
   const saved = id
     ? await run(sb.from("trips").update(row).eq("id", id).select().single())
@@ -1627,6 +1640,105 @@ async function deleteSurprise(btn) {
   openSurprises();
 }
 
+// ═══ Our story: the timeline ═════════════════════════════════════
+const arriveCity = (t) => t.arrive_city || destOf(t).city;
+const leaveCity = (t) => t.leave_city || arriveCity(t);
+const ORDINAL_WORDS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+function visitLabel(t) {
+  const n = S.trips.filter((x) => x.traveler === t.traveler && x.reunion <= t.reunion).length;
+  const who = t.traveler === S.me.name ? "Your" : `${t.traveler}'s`;
+  return `${who} ${ORDINAL_WORDS[n - 1] || ordinal(n)} visit`;
+}
+const dayDiff = (a, b) => Math.round((Date.parse(b + "T12:00:00Z") - Date.parse(a + "T12:00:00Z")) / DAY);
+
+// Visits are shown as journeys: arrival, everything that happened in between, departure
+function storyHTML() {
+  const now = Date.now(), today = dayKey(new Date());
+  const trips = S.trips.slice().sort((a, b) => a.reunion.localeCompare(b.reunion)).map((t) => {
+    const tz = destOf(t).tz;
+    return { t, tz, start: dayKey(new Date(t.reunion), tz), end: dayKey(new Date(t.goodbye), tz), events: [] };
+  });
+  const loose = [];
+  const place = (ev) => {
+    const trip = trips.find((x) => ev.date >= x.start && ev.date <= x.end);
+    (trip ? trip.events : loose).push(ev);
+  };
+  S.moments.forEach((m) => place({ kind: "moment", date: m.happened_on, m }));
+  S.surprises.filter((x) => x.for_name === S.me.name && x.found_at).forEach((x) => place({ kind: "surprise", date: dayKey(new Date(x.found_at)), x }));
+
+  const entries = [
+    ...loose.map((ev) => ({ type: "event", date: ev.date, ev })),
+    ...trips.map((tr) => ({ type: "trip", date: tr.start, tr })),
+  ];
+  const inTrip = trips.find((x) => Date.parse(x.t.reunion) <= now && now < Date.parse(x.t.goodbye));
+  if (!inTrip) entries.push({ type: "now", date: today });
+  entries.sort((a, b) => a.date.localeCompare(b.date) || ({ event: 0, trip: 1, now: 2 }[a.type] - { event: 0, trip: 1, now: 2 }[b.type]));
+  if (!entries.some((e) => e.type !== "now")) return `<div class="empty"><span>Add your first memory.</span></div>`;
+
+  const shortDay = (k) => fmt(new Date(k + "T12:00:00Z"), "UTC", { weekday: "short", day: "numeric", month: "short" });
+  const longDay = (k) => fmt(new Date(k + "T12:00:00Z"), "UTC", { day: "numeric", month: "long", year: "numeric" });
+  const photos = (list) => (list.length ? `<div class="thumbs">${list.map((p) => `<button data-zoom-btn="${esc(p)}" aria-label="Open photo"><img data-path="${esc(p)}" alt=""></button>`).join("")}</div>` : "");
+  const eventBody = (ev) => {
+    if (ev.kind === "surprise") {
+      const x = ev.x;
+      return `<div class="tl-title"><h3>${ico("us")} A surprise from ${esc(x.created_by)}</h3></div>
+        <p class="tl-note">${esc(x.message)}</p>${x.photo ? photos([x.photo]) : ""}`;
+    }
+    const m = ev.m;
+    return `<div class="tl-title"><h3>${esc(m.title)}</h3><button class="icon-btn" data-act="moment-edit" data-id="${m.id}" aria-label="Edit memory">${ico("dots")}</button></div>
+      ${m.note ? `<p class="tl-note">${esc(m.note)}</p>` : ""}${photos(m.photos)}`;
+  };
+  const evClass = (ev) => (ev.kind === "surprise" || ev.m.kind ? "milestone" : "");
+
+  let html = "", year = "", prevTrip = null, gapShown = null;
+  const nextTrip = trips.find((x) => x.start > today);
+  const lastTrip = [...trips].reverse().find((x) => x.end < today);
+  for (const e of entries) {
+    // "84 days apart" goes between two visits, before any new year heading
+    if (e.type === "trip" && prevTrip && gapShown !== e.tr) html += `<div class="tl-gap">${plural(dayDiff(prevTrip.end, e.tr.start), "day")} apart</div>`;
+    if (e.type === "now" && lastTrip && nextTrip && prevTrip === lastTrip) {
+      html += `<div class="tl-gap">${plural(dayDiff(lastTrip.end, nextTrip.start), "day")} apart</div>`;
+      gapShown = nextTrip;
+    }
+    const y = e.date.slice(0, 4);
+    if (y !== year) { html += `<div class="tl-year">${y}</div>`; year = y; }
+    if (e.type === "event") {
+      html += `<div class="tl ${evClass(e.ev)} ${e.ev.kind === "surprise" ? "surprise" : ""}"><div class="tl-date">${longDay(e.date)}</div>${eventBody(e.ev)}</div>`;
+    } else if (e.type === "now") {
+      const next = nextTrip, last = lastTrip;
+      const bits = [];
+      if (last) bits.push(`${plural(dayDiff(last.end, today), "day")} since ${esc(leaveCity(last.t))}`);
+      if (next) bits.push(`${plural(dayDiff(today, next.start), "day")} to go`);
+      html += `<div class="tl-now"><div class="tl-date">Today · ${shortDay(today)}</div><b>${bits.join(" · ") || "Our story so far"}</b></div>`;
+    } else {
+      const { t, tz, start, end, events } = e.tr;
+      prevTrip = e.tr;
+      const r = Date.parse(t.reunion), g = Date.parse(t.goodbye);
+      const future = now < r, together = r <= now && now < g;
+      const who = t.traveler === S.me.name ? "You" : esc(t.traveler);
+      const timeOf = (iso) => (t.flights ? ` · ${fTime(new Date(iso), tz)}` : "");
+      const steps = [
+        { date: start, cls: "arrive", body: `<b>${who} ${now < r ? (who === "You" ? "land" : "lands") : (who === "You" ? "landed" : "arrived")} in ${esc(arriveCity(t))}${timeOf(t.reunion)}</b>` },
+        ...events.slice().sort((a, b) => a.date.localeCompare(b.date)).map((ev) => ({ date: ev.date, cls: evClass(ev), body: eventBody(ev) })),
+      ];
+      if (together) { const ph = tripPhase(); steps.push({ date: today, cls: "now", body: `<b>Today · day ${ph.day} of ${ph.total}</b>` }); }
+      steps.sort((a, b) => a.date.localeCompare(b.date) || (a.cls === "arrive" ? -1 : b.cls === "arrive" ? 1 : 0));
+      steps.push({ date: end, cls: "leave", body: `<b>${who} ${now < g ? (who === "You" ? "fly" : "flies") : "flew"} home from ${esc(leaveCity(t))}${timeOf(t.goodbye)}</b>` });
+      const route = arriveCity(t) === leaveCity(t) ? esc(arriveCity(t)) : `${esc(arriveCity(t))} → ${esc(leaveCity(t))}`;
+      html += `<div class="tl-trip ${future ? "future" : ""} ${together ? "together" : ""}">
+        <div class="trip-head">
+          <div class="tl-date">${future ? "Coming up · " : ""}${esc(tripWhen(t))}</div>
+          <div class="tl-title"><h3>${ico("plane")} ${esc(t.title)}</h3></div>
+          <div class="trip-meta">${esc(visitLabel(t))} · ${route}</div>
+          <div class="row">${tripStatus(t)}<button class="link" data-act="trip-open" data-id="${t.id}" data-go="1">Open trip</button></div>
+        </div>
+        <ol class="trip-steps">${steps.map((st) => `<li class="step ${st.cls}"><span class="step-date">${shortDay(st.date)}</span>${st.body}</li>`).join("")}</ol>
+      </div>`;
+    }
+  }
+  return `<div class="timeline">${html}</div>`;
+}
+
 // ═══ Us: stats and timeline ══════════════════════════════════════
 
 function viewUs() {
@@ -1640,11 +1752,6 @@ function viewUs() {
   const past = S.trips.filter((t) => Date.parse(t.reunion) <= now);
   const visits = S.members.map((m) => ({ name: m.name, n: past.filter((t) => t.traveler === m.name).length }));
   const dist = distance();
-  const items = [
-    ...S.moments.map((m) => ({ kind: "moment", date: m.happened_on, m })),
-    ...S.trips.map((t) => ({ kind: "trip", date: dayKey(new Date(t.reunion), destOf(t).tz), t })),
-    ...S.surprises.filter((x) => x.for_name === S.me.name && x.found_at).map((x) => ({ kind: "surprise", date: dayKey(new Date(x.found_at)), x })),
-  ].sort((a, b) => b.date.localeCompare(a.date));
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   return `<div class="page">
     <div class="stats">
@@ -1665,29 +1772,7 @@ function viewUs() {
     </div>
     ${standalone ? "" : `<div class="card install"><b>Put M&amp;M's on your Home Screen</b><p class="muted" style="font-size:14px">In Safari, tap the Share button, then <b>Add to Home Screen</b>. It then opens like a normal app.</p></div>`}
     <div class="sec-h"><h2>Our story</h2><button class="btn small" data-act="moment-new">${ico("plus")}Add memory</button></div>
-    <div class="timeline">
-      ${items.map((it) => {
-        if (it.kind === "trip") {
-          const t = it.t, future = Date.parse(t.reunion) > now;
-          return `<div class="tl trip ${future ? "future" : ""}"><div class="tl-date">${future ? "Coming up · " : ""}${esc(tripWhen(t))}</div>
-            <div class="tl-title"><h3>${ico("plane")} ${esc(t.title)}</h3></div>
-            <div class="row">${tripStatus(t)}<button class="link" data-act="trip-open" data-id="${t.id}" data-go="1">Open trip</button></div></div>`;
-        }
-        if (it.kind === "surprise") {
-          const x = it.x;
-          return `<div class="tl milestone surprise"><div class="tl-date">${fDate(new Date(x.found_at))}</div>
-            <div class="tl-title"><h3>${ico("us")} A surprise from ${esc(x.created_by)}</h3></div>
-            <p class="tl-note">${esc(x.message)}</p>
-            ${x.photo ? `<div class="thumbs"><button data-zoom-btn="${esc(x.photo)}" aria-label="Open photo"><img data-path="${esc(x.photo)}" alt=""></button></div>` : ""}</div>`;
-        }
-        const m = it.m;
-        return `<div class="tl ${m.kind ? "milestone" : ""}"><div class="tl-date">${fDate(new Date(m.happened_on + "T12:00:00"))}</div>
-          <div class="tl-title"><h3>${esc(m.title)}</h3><button class="icon-btn" data-act="moment-edit" data-id="${m.id}" aria-label="Edit memory">${ico("dots")}</button></div>
-          ${m.note ? `<p class="tl-note">${esc(m.note)}</p>` : ""}
-          ${m.photos.length ? `<div class="thumbs">${m.photos.map((p) => `<button data-zoom-btn="${esc(p)}" aria-label="Open photo"><img data-path="${esc(p)}" alt=""></button>`).join("")}</div>` : ""}
-        </div>`;
-      }).join("") || `<div class="empty"><span>Add your first memory.</span></div>`}
-    </div>
+    ${storyHTML()}
     <div class="foot"><span class="foot-me" data-act="secret-tap">Signed in as ${esc(S.me.name)}</span><button class="link" data-act="signout">Sign out</button></div>
   </div>`;
 }
