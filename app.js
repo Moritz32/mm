@@ -100,13 +100,14 @@ const toTimeInput = (d, tz) => { const p = zoneParts(d, tz); return `${String(p.
 const S = {
   started: false, me: null, partner: null, members: [],
   posts: [], reactions: [], more: false, msgCount: 0,
-  trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [],
+  trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [],
   tab: tabFromHash(), tripId: null, tripSub: "plan", packOwner: null,
   urls: new Map(), uploading: 0, channel: null, prefill: null,
 };
 const KEYS = {
   posts: (r) => r.id, reactions: (r) => `${r.post_id}|${r.author}`, trip_days: (r) => `${r.trip_id}|${r.day}`,
   trips: (r) => r.id, ideas: (r) => r.id, packing: (r) => r.id, availability: (r) => r.id, calls: (r) => r.id, moments: (r) => r.id,
+  locations: (r) => r.name,
 };
 const SORTS = {
   posts: (a, b) => a.created_at.localeCompare(b.created_at),
@@ -260,6 +261,10 @@ async function start(session) {
     subscribe();
     renderShell();
     if (!S.timer) S.timer = setInterval(tick, 1000);
+    checkDrop();
+    if (location.hash === "#drop") { const ph = tripPhase(); if (ph.kind === "countdown") celebrate(ph.days + 1, ph.days); }
+    shareLocation(false);
+    if (!S.locTimer) S.locTimer = setInterval(() => shareLocation(false), 10 * MIN);
   } catch (e) {
     S.started = false;
     $("#app").innerHTML = `<section class="login"><div class="login-box"><div class="logo">${ico("heart")}</div><h1>Can't connect</h1><p class="muted">Check your internet connection, then try again.</p><button class="btn" data-act="reload">Try again</button></div></section>`;
@@ -268,11 +273,11 @@ async function start(session) {
 
 function stop() {
   if (S.channel) sb.removeChannel(S.channel);
-  Object.assign(S, { started: false, channel: null, me: null, partner: null, posts: [], reactions: [], trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], tripId: null });
+  Object.assign(S, { started: false, channel: null, me: null, partner: null, posts: [], reactions: [], trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], tripId: null, dropSeen: null });
 }
 
 async function loadAll() {
-  const [posts, trips, days, ideas, packing, availability, calls, moments, count] = await Promise.all([
+  const [posts, trips, days, ideas, packing, availability, calls, moments, count, locations] = await Promise.all([
     run(sb.from("posts").select("*").order("created_at", { ascending: false }).limit(PAGE)),
     run(sb.from("trips").select("*").order("reunion")),
     run(sb.from("trip_days").select("*")),
@@ -282,10 +287,11 @@ async function loadAll() {
     run(sb.from("calls").select("*").order("starts_at")),
     run(sb.from("moments").select("*").order("happened_on", { ascending: false })),
     sb.from("posts").select("id", { count: "exact", head: true }).eq("kind", "note"),
+    sb.from("locations").select("*").then((r) => r.data || []),
   ]);
   S.posts = posts.slice().reverse();
   S.more = posts.length === PAGE;
-  Object.assign(S, { trips, trip_days: days, ideas, packing, availability, calls, moments });
+  Object.assign(S, { trips, trip_days: days, ideas, packing, availability, calls, moments, locations });
   S.msgCount = count?.count ?? posts.filter((p) => p.kind === "note").length;
   S.reactions = posts.length ? await run(sb.from("reactions").select("*").in("post_id", posts.map((p) => p.id))) : [];
 }
@@ -366,6 +372,7 @@ function renderHeader() {
 const clock = () => fmt(new Date(), S.partner.tz, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 function tick() {
+  checkDrop();
   const c = $("#partner-clock");
   if (c) c.textContent = clock();
   renderHeader();
@@ -381,6 +388,7 @@ function renderView() {
     view.innerHTML = { trips: viewTrips, calls: viewCalls, us: viewUs }[S.tab]();
   });
   hydratePhotos(view);
+  if (S.tab === "calls") updateCallPreview();
 }
 
 // Keep focus, typing and scroll position when live updates re-render a view
@@ -937,7 +945,7 @@ function viewCalls() {
     return `<div class="both-times"><div><small>You</small><b>${fDay(d)} · ${fTime(d)}</b></div><div><small>${esc(P.name)} · ${esc(P.city)}</small><b>${fDay(d, P.tz)} · ${fTime(d, P.tz)}</b></div></div>`;
   };
   const slots = overlaps(7);
-  const pre = S.prefill || {};
+  const pre = S.prefill || defaultCallTime();
   S.prefill = null;
   const feed = `${CALENDAR_FEED}?token=${S.me.calendar_token}`;
   const webcal = feed.replace(/^https:/, "webcal:");
@@ -1076,22 +1084,127 @@ async function cancelCall(id) {
   toast("Call removed");
 }
 
-// ═══ Us: stats and timeline ══════════════════════════════════════
-function distanceKm(a, b) {
-  const A = CITIES[a], B = CITIES[b];
-  if (!A || !B) return null;
+// Next full hour, so the time box never starts empty
+function defaultCallTime() {
+  const d = new Date(Date.now() + HOUR);
+  d.setMinutes(0, 0, 0);
+  return { date: dayKey(d), time: toTimeInput(d, LOCAL_TZ) };
+}
+
+// ═══ Live distance ═══════════════════════════════════════════════
+function haversineKm(A, B) {
   const rad = (x) => (x * Math.PI) / 180;
   const h = Math.sin(rad(B.lat - A.lat) / 2) ** 2 + Math.cos(rad(A.lat)) * Math.cos(rad(B.lat)) * Math.sin(rad(B.lon - A.lon) / 2) ** 2;
-  return Math.round(2 * 6371 * Math.asin(Math.sqrt(h)));
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
 }
+function placeOf(name) {
+  const row = S.locations.find((l) => l.name === name);
+  if (row) return { lat: +row.lat, lon: +row.lon, live: true, at: row.updated_at };
+  const c = CITIES[member(name)?.city];
+  return c ? { ...c, live: false } : null;
+}
+function distance() {
+  const a = placeOf(S.me.name), b = placeOf(S.partner.name);
+  if (!a || !b) return null;
+  const km = haversineKm(a, b);
+  const miles = S.me.tz.startsWith("America/");
+  const value = Math.round(miles ? km * 0.621371 : km);
+  const oldest = a.live && b.live ? Math.min(Date.parse(a.at), Date.parse(b.at)) : null;
+  return { km, value, unit: miles ? "miles" : "km", live: a.live && b.live, oldest, together: km < 2 };
+}
+function agoText(t) {
+  const m = Math.round((Date.now() - t) / MIN);
+  if (m < 2) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+}
+const sharing = () => { try { return localStorage.getItem("mm-share-location") === "on"; } catch (e) { return false; } };
+const setSharing = (on) => { try { localStorage.setItem("mm-share-location", on ? "on" : "off"); } catch (e) { /* private mode */ } };
+
+// Your position, rounded to about 1 km; only the distance is ever shown
+function shareLocation(force) {
+  if (!S.me || !navigator.geolocation || (!force && !sharing())) return;
+  const mine = S.locations.find((l) => l.name === S.me.name);
+  if (!force && mine && Date.now() - Date.parse(mine.updated_at) < 9 * MIN) return;
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    const row = { name: S.me.name, lat: Math.round(pos.coords.latitude * 100) / 100, lon: Math.round(pos.coords.longitude * 100) / 100, updated_at: new Date().toISOString() };
+    setSharing(true);
+    upsertRow("locations", row);
+    if (S.tab === "us") renderView();
+    try { await run(sb.from("locations").upsert(row), "Couldn't update your distance."); } catch (e) { /* shown */ }
+  }, (err) => {
+    if (err.code === 1) {
+      setSharing(false);
+      if (force) toast("Location is off for M&M's. Allow it in Settings → Privacy & Security → Location Services.");
+      if (S.tab === "us") renderView();
+    }
+  }, { enableHighAccuracy: false, maximumAge: 10 * MIN, timeout: 20000 });
+}
+async function stopSharing() {
+  setSharing(false);
+  removeRow("locations", { name: S.me.name });
+  renderView();
+  try { await run(sb.from("locations").delete().eq("name", S.me.name)); } catch (e) { /* shown */ }
+  toast("Stopped sharing your distance");
+}
+
+// ═══ The day count drops: a small celebration ════════════════════
+function dropValue() {
+  const ph = tripPhase();
+  if (!ph.trip) return null;
+  const v = ph.kind === "countdown" ? ph.days : ph.kind === "lastday" ? 0 : -1;
+  return { key: `mm-days-${ph.trip.id}`, v, ph };
+}
+function checkDrop() {
+  const d = dropValue();
+  if (!d) return;
+  if (S.dropSeen && S.dropSeen.key === d.key && S.dropSeen.v === d.v) return; // nothing changed this second
+  let prev = null;
+  try { prev = localStorage.getItem(d.key); localStorage.setItem(d.key, String(d.v)); } catch (e) { prev = S.dropSeen && S.dropSeen.key === d.key ? String(S.dropSeen.v) : null; }
+  S.dropSeen = { key: d.key, v: d.v };
+  if (prev !== null && d.v < +prev) celebrate(+prev, d.v);
+}
+function celebrate(from, to) {
+  if ($(".celebrate")) return;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const label = to > 0 ? (to === 1 ? "day to go" : "days to go") : to === 0 ? "Today's the day" : "Together";
+  const eyebrow = to > 0 ? "One day closer" : to === 0 ? "It's happening" : "Finally";
+  const shown = (n) => (n > 0 ? String(n) : n === 0 ? "0" : "♥");
+  const hearts = reduce ? "" : Array.from({ length: 22 }, (_, i) => {
+    const a = (i / 22) * Math.PI * 2 + Math.random() * 0.4;
+    const r = 120 + Math.random() * 140;
+    return `<i style="--dx:${Math.round(Math.cos(a) * r)}px;--dy:${Math.round(Math.sin(a) * r)}px;--s:${(0.6 + Math.random() * 0.9).toFixed(2)};--d:${Math.round(Math.random() * 180)}ms">${ico("heart")}</i>`;
+  }).join("");
+  const box = document.createElement("div");
+  box.className = "celebrate";
+  box.setAttribute("role", "status");
+  box.innerHTML = `<div class="burst" aria-hidden="true">${hearts}</div>
+    <div class="cel-card">
+      <span class="eyebrow">${eyebrow}</span>
+      <div class="flip" aria-label="${to > 0 ? to : ""} ${label}"><b class="old">${shown(from)}</b><b class="new">${shown(to)}</b></div>
+      <p>${label} ♥</p>
+    </div>`;
+  box.addEventListener("click", () => box.remove());
+  document.body.append(box);
+  navigator.vibrate?.([10, 60, 10]);
+  setTimeout(() => box.classList.add("out"), 3600);
+  setTimeout(() => box.remove(), 4100);
+}
+
+// ═══ Us: stats and timeline ══════════════════════════════════════
 
 function viewUs() {
   const now = Date.now();
-  const firstMoment = S.moments.slice().sort((a, b) => a.happened_on.localeCompare(b.happened_on))[0];
-  const since = firstMoment ? new Date(firstMoment.happened_on + "T12:00:00") : null;
-  const sinceDays = since ? Math.floor((now - since) / DAY) : 0;
+  const dateOf = (m) => (m ? new Date(m.happened_on + "T12:00:00") : null);
+  const sorted = S.moments.slice().sort((a, b) => a.happened_on.localeCompare(b.happened_on));
+  const couple = dateOf(S.moments.find((m) => m.kind === "couple"));
+  const met = dateOf(S.moments.find((m) => m.kind === "met") || sorted[0]);
+  const daysSince = (d) => Math.floor((now - d) / DAY);
   const together = S.trips.reduce((sum, t) => sum + Math.max(0, Math.min(now, Date.parse(t.goodbye)) - Date.parse(t.reunion)), 0);
-  const km = distanceKm(S.me.city, S.partner.city);
+  const past = S.trips.filter((t) => Date.parse(t.reunion) <= now);
+  const visits = S.members.map((m) => ({ name: m.name, n: past.filter((t) => t.traveler === m.name).length }));
+  const dist = distance();
   const items = [
     ...S.moments.map((m) => ({ kind: "moment", date: m.happened_on, m })),
     ...S.trips.map((t) => ({ kind: "trip", date: dayKey(new Date(t.reunion), destOf(t).tz), t })),
@@ -1099,11 +1212,20 @@ function viewUs() {
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   return `<div class="page">
     <div class="stats">
-      ${since ? `<div class="stat wide"><b>${sinceDays.toLocaleString()} days</b><span>since ${fDate(since)}</span></div>` : ""}
+      ${couple ? `<div class="stat wide"><b>${daysSince(couple).toLocaleString()} days</b><span>a couple since ${fDate(couple)}</span></div>` : ""}
+      ${met ? `<div class="stat"><b>${daysSince(met).toLocaleString()}</b><span>days since we met</span></div>` : ""}
       <div class="stat"><b>${Math.floor(together / DAY)}</b><span>days side by side</span></div>
-      <div class="stat"><b>${S.trips.length}</b><span>${S.trips.length === 1 ? "trip" : "trips"}</span></div>
+      <div class="stat"><b>${visits.reduce((a, v) => a + v.n, 0)}</b><span>${visits.reduce((a, v) => a + v.n, 0) === 1 ? "visit" : "visits"} · ${visits.map((v) => `${esc(v.name)} ${v.n}`).join(", ")}</span></div>
       <div class="stat"><b>${S.msgCount.toLocaleString()}</b><span>messages</span></div>
-      <div class="stat"><b>${km ? km.toLocaleString() : "–"}</b><span>km between you</span></div>
+      <div class="stat wide dist">
+        <div class="row" style="justify-content:space-between;align-items:flex-end">
+          <div class="dist-main"><b>${dist ? (dist.together ? "Together ♥" : `${dist.value.toLocaleString()} ${dist.unit}`) : "–"}</b><span>${dist && !dist.together ? "between you" : ""}${dist && dist.live ? ` · live, updated ${agoText(dist.oldest)}` : " · between your cities"}</span></div>
+          ${ico("pin")}
+        </div>
+        ${sharing()
+          ? `<button class="link" data-act="loc-stop">Stop sharing my distance</button>`
+          : `<button class="btn soft small" data-act="loc-share">${ico("pin")}Share my live distance</button><span class="fine">Your position is rounded to about 1 km. Only the distance is shown.</span>`}
+      </div>
     </div>
     ${standalone ? "" : `<div class="card install"><b>Put M&amp;M's on your Home Screen</b><p class="muted" style="font-size:14px">In Safari, tap the Share button, then <b>Add to Home Screen</b>. It then opens like a normal app.</p></div>`}
     <div class="sec-h"><h2>Our story</h2><button class="btn small" data-act="moment-new">${ico("plus")}Add memory</button></div>
@@ -1116,7 +1238,7 @@ function viewUs() {
             <div class="row">${tripStatus(t)}<button class="link" data-act="trip-open" data-id="${t.id}" data-go="1">Open trip</button></div></div>`;
         }
         const m = it.m;
-        return `<div class="tl"><div class="tl-date">${fDate(new Date(m.happened_on + "T12:00:00"))}</div>
+        return `<div class="tl ${m.kind ? "milestone" : ""}"><div class="tl-date">${fDate(new Date(m.happened_on + "T12:00:00"))}</div>
           <div class="tl-title"><h3>${esc(m.title)}</h3><button class="icon-btn" data-act="moment-edit" data-id="${m.id}" aria-label="Edit memory">${ico("dots")}</button></div>
           ${m.note ? `<p class="tl-note">${esc(m.note)}</p>` : ""}
           ${m.photos.length ? `<div class="thumbs">${m.photos.map((p) => `<button data-zoom-btn="${esc(p)}" aria-label="Open photo"><img data-path="${esc(p)}" alt=""></button>`).join("")}</div>` : ""}
@@ -1253,6 +1375,8 @@ document.addEventListener("click", async (e) => {
       case "call-accept": return await setCall(id, "accepted");
       case "call-decline": return await setCall(id, "declined");
       case "call-cancel": return await cancelCall(id);
+      case "loc-share": return shareLocation(true);
+      case "loc-stop": return await stopSharing();
       case "moment-new": return openMomentSheet(null);
       case "moment-edit": return openMomentSheet(S.moments.find((m) => m.id === id));
       case "moment-del": return await deleteMoment(el);
@@ -1333,7 +1457,10 @@ document.addEventListener("keydown", (e) => {
 
 // Coming back to the app after a while: catch up
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && S.started && S.me) loadAll().then(() => refresh("all")).catch(() => {});
+  if (document.visibilityState === "visible" && S.started && S.me) {
+    loadAll().then(() => { refresh("all"); checkDrop(); }).catch(() => {});
+    shareLocation(false);
+  }
 });
 
 boot();
