@@ -48,6 +48,12 @@ const PATHS = {
   speaker: '<path d="M4 9.5h3.5L12 6v12l-4.5-3.5H4z"/><path d="M15.5 9.3a3.8 3.8 0 0 1 0 5.4M18.2 6.8a7.5 7.5 0 0 1 0 10.4"/>',
   smile: '<circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.3a4.6 4.6 0 0 0 6.8 0"/><circle cx="9.3" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="14.7" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
   reply: '<path d="M9.5 6.5 4 12l5.5 5.5"/><path d="M4.5 12H14a6 6 0 0 1 6 6v.5"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/>',
+  star: '<path d="M12 3.8l2.5 5.1 5.6.8-4 3.9 1 5.6-5.1-2.7-5.1 2.7 1-5.6-4-3.9 5.6-.8z"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  mic: '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/>',
+  play: '<path fill="currentColor" stroke="none" d="M8 5.6v12.8a1 1 0 0 0 1.5.86l10.2-6.4a1 1 0 0 0 0-1.72L9.5 4.74A1 1 0 0 0 8 5.6z"/>',
+  pause: '<rect x="6.5" y="5" width="3.8" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.7" y="5" width="3.8" height="14" rx="1.2" fill="currentColor" stroke="none"/>',
   photo: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="9" cy="10" r="1.8"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/>',
 };
 const ico = (name, cls = "i") =>
@@ -113,6 +119,7 @@ const S = {
   started: false, me: null, partner: null, members: [],
   posts: [], reactions: [], more: false, msgCount: 0,
   chatV2: false, replyTo: null, editing: null, editText: null, draftKeep: "", quoted: new Map(), // replies and edits
+  chatV3: false, saved: [], rec: null, playing: null, audio: null, sendingVoice: 0, unreadFrom: null, searchSeq: 0, // voice, send later, saved
   trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], words: [],
   tab: tabFromHash(), tripId: null, tripSub: "plan", packOwner: null,
   urls: new Map(), uploading: 0, channel: null, prefill: null,
@@ -120,7 +127,7 @@ const S = {
 const KEYS = {
   posts: (r) => r.id, reactions: (r) => `${r.post_id}|${r.author}`, trip_days: (r) => `${r.trip_id}|${r.day}`,
   trips: (r) => r.id, ideas: (r) => r.id, packing: (r) => r.id, availability: (r) => r.id, calls: (r) => r.id, moments: (r) => r.id,
-  locations: (r) => r.name, surprises: (r) => r.id, words: (r) => r.id,
+  locations: (r) => r.name, surprises: (r) => r.id, words: (r) => r.id, saved: (r) => `${r.post_id}|${r.saved_by}`,
 };
 const SORTS = {
   posts: (a, b) => a.created_at.localeCompare(b.created_at),
@@ -153,6 +160,8 @@ function removeRow(t, row) {
     // replies to it lose their quote (the database does the same), and a reply or edit in progress stops
     for (const p of S.posts) if (p.reply_to === row.id) p.reply_to = null;
     S.quoted.delete(row.id);
+    S.saved = S.saved.filter((x) => x.post_id !== row.id);
+    if (S.playing?.id === row.id) voiceStop();
     if (S.replyTo === row.id || S.editing === row.id) cancelCtx();
   }
 }
@@ -297,7 +306,7 @@ async function start(session) {
 
 function stop() {
   if (S.channel) sb.removeChannel(S.channel);
-  Object.assign(S, { started: false, channel: null, me: null, partner: null, posts: [], reactions: [], trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], words: [], tripId: null, dropSeen: null });
+  Object.assign(S, { started: false, channel: null, me: null, partner: null, posts: [], reactions: [], trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], words: [], saved: [], tripId: null, dropSeen: null });
 }
 
 async function loadAll() {
@@ -314,9 +323,11 @@ async function loadAll() {
     sb.from("locations").select("*").then((r) => r.data || []),
     sb.from("surprises").select("*").then((r) => r.data || [], () => []),
     sb.from("words").select("*").order("created_at").then((r) => r.data || [], () => []),
-    // replies and edits light up once the database has them (update 8)
+    // replies and edits light up once the database has them (update 8); voice, send later and saved with update 9
     sb.from("posts").select("reply_to,edited_at").limit(1).then((r) => !r.error, () => false),
-  ]).then((r) => { S.chatV2 = r.pop(); return r; });
+    sb.from("posts").select("send_at,meta").limit(1).then((r) => !r.error, () => false),
+    sb.from("saved").select("*").then((r) => (r.error ? null : r.data), () => null),
+  ]).then((r) => { const saved = r.pop(); S.chatV3 = r.pop() && !!saved; S.chatV2 = r.pop(); S.saved = saved || []; return r; });
   S.posts = posts.slice().reverse();
   S.more = posts.length === PAGE;
   Object.assign(S, { trips, trip_days: days, ideas, packing, availability, calls, moments, locations, surprises, words });
@@ -328,7 +339,8 @@ async function loadAll() {
 // Replies to messages older than what's loaded still show what they answer
 async function fetchQuoted() {
   if (!S.chatV2) return false;
-  const need = [...new Set(S.posts.map((p) => p.reply_to).filter((id) => id && !S.quoted.has(id) && !S.posts.some((x) => x.id === id)))];
+  const ids = [...S.posts.map((p) => p.reply_to), ...S.saved.map((x) => x.post_id)];
+  const need = [...new Set(ids.filter((id) => id && !S.quoted.has(id) && !S.posts.some((x) => x.id === id)))];
   if (!need.length) return false;
   const { data } = await sb.from("posts").select("*").in("id", need);
   for (const p of data || []) S.quoted.set(p.id, p);
@@ -338,13 +350,15 @@ async function fetchQuoted() {
 function subscribe() {
   const ch = sb.channel("mm-live");
   for (const t of Object.keys(KEYS)) {
+    if (t === "saved" && !S.chatV3) continue; // the table arrives with update 9
     ch.on("postgres_changes", { event: "*", schema: "public", table: t }, (p) => {
       if (t === "surprises" && p.eventType === "UPDATE") noticeFound(p.new);
-      if (t === "posts" && p.eventType === "INSERT" && p.new.author !== S.me?.name && p.new.kind === "note" && !S.posts.some((x) => x.id === p.new.id)) builtInEggs(p.new.body, false);
+      // a new message from her (or one she scheduled, arriving now)
+      if (t === "posts" && p.eventType !== "DELETE" && p.new.author !== S.me?.name && p.new.kind === "note" && !p.new.send_at && !S.posts.some((x) => x.id === p.new.id)) builtInEggs(p.new.body, false);
       if (p.eventType === "DELETE") removeRow(t, p.old);
       else upsertRow(t, p.new);
       refresh(t);
-      if (t === "posts" && p.new?.reply_to) fetchQuoted().then((got) => { if (got) refresh(t); });
+      if ((t === "posts" && p.new?.reply_to) || (t === "saved" && p.eventType === "INSERT")) fetchQuoted().then((got) => { if (got) refresh(t); });
     });
   }
   ch.subscribe((status) => {
@@ -358,7 +372,7 @@ function subscribe() {
 // Re-render what a change touches
 function refresh(t) {
   renderHeader();
-  if (S.tab === "chat" && (t === "posts" || t === "reactions" || t === "all")) renderMsgs();
+  if (S.tab === "chat" && (t === "posts" || t === "reactions" || t === "saved" || t === "all")) { renderMsgs(); renderChatTools(); markSeen(); }
   else if (S.tab !== "chat") renderView();
 }
 
@@ -377,6 +391,7 @@ function renderShell() {
 
 function setTab(tab) {
   if (tab === S.tab && tab === "trips") S.tripId = null;
+  if (tab !== "chat" && S.rec) voiceFinish(false);
   S.tab = tab;
   history.replaceState(null, "", `#${tab}`);
   $$(".tab").forEach((b) => { if (b.dataset.tab === tab) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
@@ -533,27 +548,60 @@ async function copyText(text) {
 
 // ═══ Chat ════════════════════════════════════════════════════════
 function viewChat(view) {
+  const canVoice = S.chatV3 && voiceSupported();
   view.innerHTML = `
+    <div class="chat-tools" id="chat-tools">${chatToolsHTML()}</div>
     <div class="msgs" id="msgs" aria-label="Messages"></div>
     <div class="emoji-panel" id="emoji-panel" hidden></div>
     <div class="compose-ctx" id="compose-ctx" hidden></div>
-    <form class="composer" data-form="send">
+    <form class="composer${canVoice ? " can-voice" : ""}" data-form="send">
       <label class="icon-btn" aria-label="Send a photo">${ico("camera")}<input type="file" accept="image/*" hidden data-file="chat"></label>
       <button type="button" class="icon-btn" data-act="send-heart" aria-label="Send a heart">${ico("heart")}</button>
       <button type="button" class="icon-btn" data-act="emoji-panel" aria-label="Emojis" aria-expanded="false" aria-controls="emoji-panel">${ico("smile")}</button>
       <textarea id="composer" rows="1" maxlength="2000" placeholder="Message ${esc(S.partner.name)}" aria-label="Message"></textarea>
-      <button class="send" type="submit" aria-label="Send" disabled>${ico("send")}</button>
+      ${S.chatV3 ? `<button type="button" class="icon-btn sched-btn" data-act="send-later" aria-label="Send later">${ico("clock")}</button>` : ""}
+      ${canVoice ? `<button type="button" class="mic-btn" data-act="voice-start" aria-label="Record a voice message">${ico("mic")}</button>` : ""}
+      <button class="send" id="send-btn" type="submit" aria-label="Send" disabled>${ico("send")}</button>
+      <div class="rec" id="rec" hidden>
+        <button type="button" class="icon-btn" data-act="voice-cancel" aria-label="Delete recording">${ico("trash")}</button>
+        <span class="rec-dot" aria-hidden="true"></span><span class="rec-time" id="rec-time" role="timer">0:00</span>
+        <span class="rec-level" id="rec-level" aria-hidden="true">${"<i></i>".repeat(24)}</span>
+        <button type="button" class="send" data-act="voice-send" aria-label="Send voice message">${ico("send")}</button>
+      </div>
     </form>`;
   const ta = $("#composer");
   ta.value = S.editing ? S.editText ?? "" : S.draft || "";
   autosize(ta);
-  $(".send").disabled = !ta.value.trim();
+  syncComposer();
   renderComposeCtx();
+  computeUnread();
   renderMsgs(true);
-  bindPress($("#msgs"));
+  const sep = $("#new-sep"), box = $("#msgs");
+  if (sep) box.scrollTop += sep.getBoundingClientRect().top - box.getBoundingClientRect().top - 12;
+  markSeen();
+  bindPress(box);
 }
 
 function autosize(ta) { ta.style.height = "auto"; ta.style.height = Math.min(120, ta.scrollHeight) + "px"; }
+// Send or record, clock while typing, heart while not
+function syncComposer() {
+  const ta = $("#composer"), form = $(".composer");
+  if (!ta || !form) return;
+  const has = !!ta.value.trim();
+  form.classList.toggle("has-text", has);
+  $("#send-btn").disabled = !has;
+}
+
+function chatToolsHTML() {
+  const n = savedCount();
+  return `<button class="chat-search" data-act="chat-search">${ico("search")}<span>Search messages</span></button>
+    ${S.chatV3 ? `<button class="chat-saved" data-act="saved-list" aria-label="Saved messages${n ? `, ${n}` : ""}">${ico("star")}<span>Saved${n ? ` · ${n}` : ""}</span></button>` : ""}`;
+}
+function renderChatTools() { const el = $("#chat-tools"); if (el) el.innerHTML = chatToolsHTML(); }
+
+// A scheduled message is yours alone until it's due
+const isPending = (p) => !!p.send_at && Date.parse(p.send_at) > Date.now();
+const delivered = () => S.posts.filter((p) => !isPending(p));
 
 function renderMsgs(forceBottom) {
   const box = $("#msgs");
@@ -566,39 +614,92 @@ function renderMsgs(forceBottom) {
   }
   let last = "";
   for (const p of S.posts) {
+    if (isPending(p)) continue;
     const d = new Date(p.created_at), k = dayKey(d);
     if (k !== last) { html += `<div class="day-sep">${esc(dayLabel(d))}</div>`; last = k; }
+    if (p.id === S.unreadFrom) html += `<div class="new-sep" id="new-sep"><span>New messages</span></div>`;
     html += msgHTML(p);
   }
   if (S.uploading) html += `<div class="uploading">Sending ${S.uploading > 1 ? `${S.uploading} photos` : "photo"}…</div>`;
+  if (S.sendingVoice) html += `<div class="uploading">Sending voice message…</div>`;
+  const pend = S.posts.filter((p) => isPending(p) && p.author === S.me.name).sort((a, b) => a.send_at.localeCompare(b.send_at));
+  if (pend.length) html += `<div class="day-sep sched-sep">${ico("clock")}Scheduled</div>${pend.map((p) => msgHTML(p)).join("")}`;
   box.innerHTML = html;
   hydratePhotos(box);
+  hydrateVoice(box);
   if (forceBottom === "keep-top") box.scrollTop = box.scrollHeight - prevH + prevTop;
   else if (forceBottom || atBottom) box.scrollTop = box.scrollHeight;
   else box.scrollTop = prevTop;
+  // when the next scheduled one is due, move it into the chat even if the server's note is late
+  clearTimeout(S.dueT);
+  if (pend[0]) S.dueT = setTimeout(() => renderMsgs(), Math.min(2 ** 31 - 1, Date.parse(pend[0].send_at) - Date.now() + 1000));
 }
 
 function msgHTML(p) {
   const mine = p.author === S.me.name;
   const who = mine ? "You" : esc(p.author);
-  const time = fTime(new Date(p.created_at));
+  const d = new Date(p.created_at), time = fTime(d);
   if (p.kind === "heart") return `<div class="event">${ico("heart")}${who} sent a heart · ${time}</div>`;
   if (p.kind === "trip") return `<div class="event">${ico("plane")}${who} updated the trip dates · ${time}</div>`;
-  const reacts = S.reactions.filter((r) => r.post_id === p.id);
+  const pending = isPending(p);
+  const reacts = pending ? [] : S.reactions.filter((r) => r.post_id === p.id);
   const groups = {};
   for (const r of reacts) (groups[r.emoji] ||= []).push(r.author === S.me.name ? "You" : r.author);
   const reactHTML = reacts.length
     ? `<div class="reacts">${Object.entries(groups).map(([e, names]) => `<span class="react" title="${esc(names.join(", "))}">${e}${names.length > 1 ? " " + names.length : ""}</span>`).join("")}</div>`
     : "";
-  const body = p.kind === "photo"
-    ? `<div class="bubble photo" data-press="${p.id}"><img data-path="${esc(p.body)}" alt="Photo from ${who}" data-zoom="${esc(p.body)}"></div>`
-    : `<div class="bubble${emojiOnly(p.body) ? ` emoji n${emojiOnly(p.body)}${/^[\s❤️♥️💖💗💓💕💞💘🩷]+$/u.test(p.body) ? " beat" : ""}` : ""}" data-press="${p.id}">${esc(p.body)}</div>`;
-  const replyBtn = S.chatV2 ? `<button class="m-reply" data-act="reply" data-id="${p.id}" aria-label="Reply">${ico("reply")}</button>` : "";
-  return `<div class="m ${mine ? "mine" : ""}">${quoteHTML(p)}${body}${reactHTML}<div class="meta">${time}${p.edited_at ? " · Edited" : ""}</div>${replyBtn}</div>`;
+  let body;
+  if (p.kind === "photo") body = `<div class="bubble photo" data-press="${p.id}"><img data-path="${esc(p.body)}" alt="Photo from ${who}" data-zoom="${esc(p.body)}"></div>`;
+  else if (p.kind === "voice") body = voiceHTML(p);
+  else {
+    const em = emojiOnly(p.body);
+    body = `<div class="bubble${em ? ` emoji n${em}${/^[\s❤️♥️💖💗💓💕💞💘🩷]+$/u.test(p.body) ? " beat" : ""}` : ""}" data-press="${p.id}">${em ? esc(p.body) : linkify(esc(p.body))}</div>`;
+  }
+  const savers = savedBy(p.id);
+  const star = savers.length ? ` · <span class="star-mark" title="Saved by ${esc(savers.map((n) => (n === S.me.name ? "you" : n)).join(" and "))}">${ico("star")}</span>` : "";
+  const meta = pending
+    ? `<div class="meta">${ico("clock")}Arrives ${esc(herWhen(new Date(p.send_at)))}</div>`
+    : `<div class="meta" title="${esc(bothTimes(d))}">${time}${p.edited_at ? " · Edited" : ""}${star}</div>`;
+  const replyBtn = S.chatV2 && !pending ? `<button class="m-reply" data-act="reply" data-id="${p.id}" aria-label="Reply">${ico("reply")}</button>` : "";
+  return `<div class="m${mine ? " mine" : ""}${pending ? " pending" : ""}">${quoteHTML(p)}${body}${reactHTML}${meta}${replyBtn}</div>`;
 }
+
+// Links in messages open in Safari
+function linkify(escaped) {
+  return escaped.replace(/\b(?:https?:\/\/|www\.)[^\s<]+/gi, (m) => {
+    let url = m, tail = "";
+    for (let t; (t = url.match(/(?:[.,!?;:)\]}]|&quot;|&#39;)$/)); ) { tail = t[0] + tail; url = url.slice(0, -t[0].length); }
+    if (!/[a-z0-9]/i.test(url.replace(/^(https?:\/\/|www\.)/i, ""))) return m;
+    return `<a href="${/^www\./i.test(url) ? "https://" + url : url}" target="_blank" rel="noopener noreferrer">${url}</a>${tail}`;
+  });
+}
+
+// "Thu 5 Nov · 01:08 your time · 19:08 (Wed 4 Nov) in Boston"
+function bothTimes(d) {
+  const tz = S.partner.tz;
+  const mineTxt = `${fDay(d)} · ${fTime(d)}`;
+  if (fTime(d, tz) === fTime(d) && dayKey(d, tz) === dayKey(d)) return mineTxt;
+  return `${mineTxt} your time · ${fTime(d, tz)}${dayKey(d, tz) !== dayKey(d) ? ` (${fDay(d, tz)})` : ""} in ${S.partner.city}`;
+}
+function relDay(d, tz) {
+  const k = dayKey(d, tz);
+  if (k === dayKey(new Date(), tz)) return "today";
+  if (k === dayKey(new Date(Date.now() + DAY), tz)) return "tomorrow";
+  return fDay(d, tz);
+}
+// when a scheduled message arrives, in her time and in yours
+const herWhen = (d) => `${relDay(d, S.partner.tz)} ${fTime(d, S.partner.tz)} in ${S.partner.city}`;
+const myWhen = (d) => `${relDay(d, LOCAL_TZ) === relDay(d, S.partner.tz) ? "" : relDay(d, LOCAL_TZ) + " "}${fTime(d)} your time`;
 
 const snip = (s, n = 120) => { const t = String(s || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
 const findPost = (id) => S.posts.find((x) => x.id === id) || S.quoted.get(id);
+const mmss = (s) => `${Math.floor((s || 0) / 60)}:${String(Math.floor((s || 0) % 60)).padStart(2, "0")}`;
+// One line describing a message, for quotes, the reply bar, saved and search
+function gist(o, n = 100) {
+  if (o.kind === "photo") return "Photo";
+  if (o.kind === "voice") return `Voice message · ${mmss(o.meta?.duration)}`;
+  return snip(o.body, n);
+}
 // The message a reply answers, shown small above it; tap to jump there
 function quoteHTML(p) {
   const o = p.reply_to && findPost(p.reply_to);
@@ -606,8 +707,34 @@ function quoteHTML(p) {
   const who = o.author === S.me.name ? "You" : esc(o.author);
   const what = o.kind === "photo"
     ? `<span class="q-photo"><img data-path="${esc(o.body)}" alt="">Photo</span>`
-    : `<span class="q-text">${esc(snip(o.body, 160))}</span>`;
-  return `<button class="quote${o.author === S.me.name ? " me" : ""}" data-act="jump" data-id="${o.id}" aria-label="Reply to ${who}: ${o.kind === "photo" ? "photo" : esc(snip(o.body, 60))}. Show message"><b>${who}</b>${what}</button>`;
+    : o.kind === "voice"
+      ? `<span class="q-photo">${ico("mic")}${esc(gist(o))}</span>`
+      : `<span class="q-text">${esc(snip(o.body, 160))}</span>`;
+  return `<button class="quote${o.author === S.me.name ? " me" : ""}" data-act="jump" data-id="${o.id}" aria-label="Reply to ${who}: ${esc(gist(o, 60))}. Show message"><b>${who}</b>${what}</button>`;
+}
+
+// ── New messages line (this device remembers where you left off)
+const seenKey = () => `mm-seen-${S.me?.name}`;
+function getSeen() { try { return localStorage.getItem(seenKey()) || S.seenMem || null; } catch (e) { return S.seenMem || null; } }
+function setSeen(iso) { S.seenMem = iso; try { localStorage.setItem(seenKey(), iso); } catch (e) { /* private mode */ } }
+function computeUnread() {
+  const seen = getSeen();
+  S.unreadFrom = seen ? delivered().find((p) => p.author !== S.me.name && p.kind !== "trip" && p.created_at > seen)?.id || null : null;
+}
+function showChatUpdates() {
+  renderHeader();
+  renderChatTools();
+  computeUnread();
+  renderMsgs();
+  const sep = $("#new-sep"), box = $("#msgs");
+  if (sep && box) box.scrollTop += sep.getBoundingClientRect().top - box.getBoundingClientRect().top - 12;
+  markSeen();
+}
+function markSeen() {
+  if (S.tab !== "chat" || document.visibilityState !== "visible") return;
+  const last = delivered().at(-1);
+  const cur = getSeen();
+  if (last && (!cur || last.created_at > cur)) setSeen(last.created_at);
 }
 
 // Press and hold a message to react, reply, edit or delete; swipe it to the right to reply
@@ -676,19 +803,64 @@ function bindPress(box) {
     cancel();
     openMsgSheet(el.dataset.press);
   });
+  let lastTap = null, zoomT = null;
   box.addEventListener("click", (e) => {
     if (suppressClick) { e.preventDefault(); e.stopPropagation(); return; }
+    const el = e.target.closest("[data-press]");
+    if (el && !e.target.closest("button, a, [data-act]") && !el.closest(".m.pending")) {
+      // double-tap a message to ♥ it
+      const now = Date.now();
+      if (lastTap && lastTap.id === el.dataset.press && now - lastTap.t < 330) {
+        lastTap = null;
+        clearTimeout(zoomT);
+        e.preventDefault();
+        e.stopPropagation();
+        return loveTap(el.dataset.press);
+      }
+      lastTap = { id: el.dataset.press, t: now };
+    }
     const z = e.target.closest("[data-zoom]");
-    if (z) openLightbox(z.dataset.zoom);
+    if (z) { clearTimeout(zoomT); const path = z.dataset.zoom; zoomT = setTimeout(() => openLightbox(path), 300); }
   }, true);
+}
+
+function loveTap(id) {
+  const mineNow = S.reactions.find((r) => r.post_id === id && r.author === S.me.name)?.emoji;
+  if (mineNow !== "❤️") react(id, "❤️");
+  navigator.vibrate?.(8);
+  const el = $(`#msgs [data-press="${CSS.escape(id)}"]`);
+  if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const pop = document.createElement("i");
+  pop.className = "love-pop";
+  pop.setAttribute("aria-hidden", "true");
+  pop.innerHTML = ico("heart");
+  el.append(pop);
+  setTimeout(() => pop.remove(), 900);
 }
 
 function openMsgSheet(id) {
   const p = S.posts.find((x) => x.id === id);
   if (!p) return;
   const mine = p.author === S.me.name;
+  if (isPending(p)) {
+    const at = new Date(p.send_at);
+    openSheet(`
+      <div class="msg-when">${ico("clock")}<span>Arrives ${esc(herWhen(at))} · ${esc(myWhen(at))}</span></div>
+      <div class="msg-actions">
+        <button class="btn soft" data-act="sched-now" data-id="${id}">${ico("send")}Send now</button>
+        <button class="btn soft" data-act="sched-change" data-id="${id}">${ico("clock")}Change time</button>
+        <button class="btn soft" data-act="edit-msg" data-id="${id}">${ico("edit")}Edit</button>
+      </div>
+      <div class="sheet-actions">
+        <button class="btn danger" data-act="del-msg" data-id="${id}">${ico("trash")}Don't send it</button>
+        <button class="btn ghost" data-act="sheet-close">Cancel</button>
+      </div>`);
+    return;
+  }
   const current = S.reactions.find((r) => r.post_id === id && r.author === S.me.name)?.emoji;
+  const savedMine = S.saved.some((x) => x.post_id === id && x.saved_by === S.me.name);
   openSheet(`
+    <div class="msg-when">${ico("clock")}<span>${esc(bothTimes(new Date(p.created_at)))}</span></div>
     <div class="emoji-row" role="group" aria-label="React">
       ${EMOJIS.map((e) => `<button data-act="react" data-id="${id}" data-emoji="${e}" aria-pressed="${current === e}" aria-label="React with ${e}">${e}</button>`).join("")}
     </div>
@@ -699,6 +871,7 @@ function openMsgSheet(id) {
       ${S.chatV2 ? `<button class="btn soft" data-act="reply" data-id="${id}">${ico("reply")}Reply</button>` : ""}
       ${S.chatV2 && mine && p.kind === "note" ? `<button class="btn soft" data-act="edit-msg" data-id="${id}">${ico("edit")}Edit</button>` : ""}
       ${p.kind === "note" ? `<button class="btn soft" data-act="copy-msg" data-id="${id}">${ico("copy")}Copy</button>` : ""}
+      ${S.chatV3 ? `<button class="btn soft${savedMine ? " on" : ""}" data-act="save-msg" data-id="${id}" aria-pressed="${savedMine}">${ico("star")}${savedMine ? "Saved" : "Save"}</button>` : ""}
     </div>
     <div class="sheet-actions">
       ${mine ? `<button class="btn danger" data-act="del-msg" data-id="${id}">${ico("trash")}Delete message</button>` : ""}
@@ -722,18 +895,19 @@ async function react(id, emoji) {
 }
 
 async function deleteMsg(btn) {
+  const p = S.posts.find((x) => x.id === btn.dataset.id);
   if (!btn.dataset.sure) {
     btn.dataset.sure = "1";
-    btn.innerHTML = `${ico("trash")}Tap again to delete for both of you`;
+    btn.innerHTML = `${ico("trash")}${p && isPending(p) ? "Tap again to delete it" : "Tap again to delete for both of you"}`;
     return;
   }
-  const p = S.posts.find((x) => x.id === btn.dataset.id);
   closeSheet();
   if (!p) return;
   await run(sb.from("posts").delete().eq("id", p.id), "Couldn't delete the message.");
   removeRow("posts", p);
   renderMsgs();
   if (p.kind === "photo") sb.storage.from("photos").remove([p.body]);
+  if (p.kind === "voice") sb.storage.from("voice").remove([p.body]);
   toast("Message deleted");
 }
 
@@ -748,7 +922,7 @@ async function sendNote() {
   S.replyTo = null;
   renderComposeCtx();
   autosize(ta);
-  $(".send").disabled = true;
+  syncComposer();
   try {
     const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "note", body, ...(replyTo ? { reply_to: replyTo } : {}) }).select().single(), "Couldn't send. Check your connection and try again.");
     upsertRow("posts", row);
@@ -759,7 +933,7 @@ async function sendNote() {
     S.draft = body;
     if (replyTo && !S.editing) { S.replyTo = replyTo; renderComposeCtx(); }
     autosize(ta);
-    $(".send").disabled = false;
+    syncComposer();
   }
 }
 
@@ -771,19 +945,19 @@ function renderComposeCtx() {
   const o = id && findPost(id);
   const editing = !!(o && S.editing);
   form?.classList.toggle("editing", editing);
-  $(".send")?.setAttribute("aria-label", editing ? "Save" : "Send");
-  if ($(".send")) $(".send").innerHTML = ico(editing ? "check" : "send");
+  $("#send-btn")?.setAttribute("aria-label", editing ? "Save" : "Send");
+  if ($("#send-btn")) $("#send-btn").innerHTML = ico(editing ? "check" : "send");
   if (!o) { box.hidden = true; box.innerHTML = ""; return; }
   const who = o.author === S.me.name ? "yourself" : esc(o.author);
   box.innerHTML = `${ico(editing ? "edit" : "reply")}
-    <div class="cc-text"><b>${editing ? "Edit message" : `Replying to ${who}`}</b><span>${o.kind === "photo" ? "Photo" : esc(snip(o.body, 100))}</span></div>
+    <div class="cc-text"><b>${editing ? (isPending(o) ? "Edit scheduled message" : "Edit message") : `Replying to ${who}`}</b><span>${esc(gist(o))}</span></div>
     <button type="button" class="icon-btn" data-act="ctx-cancel" aria-label="${editing ? "Cancel editing" : "Cancel reply"}">${ico("close")}</button>`;
   box.hidden = false;
 }
 
 function startReply(id) {
   const p = S.posts.find((x) => x.id === id);
-  if (!S.chatV2 || !p || (p.kind !== "note" && p.kind !== "photo")) return;
+  if (!S.chatV2 || !p || !["note", "photo", "voice"].includes(p.kind) || isPending(p)) return;
   closeSheet();
   if (S.editing) cancelCtx();
   S.replyTo = id;
@@ -803,7 +977,7 @@ function startEdit(id) {
   if (ta) {
     ta.value = p.body;
     autosize(ta);
-    $(".send").disabled = false;
+    syncComposer();
     ta.focus();
     ta.setSelectionRange(ta.value.length, ta.value.length);
   }
@@ -818,7 +992,7 @@ function cancelCtx() {
   const ta = $("#composer");
   if (wasEditing) {
     S.draft = S.draftKeep || "";
-    if (ta) { ta.value = S.draft; autosize(ta); $(".send").disabled = !ta.value.trim(); }
+    if (ta) { ta.value = S.draft; autosize(ta); syncComposer(); }
   }
   renderComposeCtx();
 }
@@ -831,7 +1005,7 @@ async function saveEdit() {
   if (!body) return;
   if (body === p.body) return cancelCtx();
   const before = { ...p };
-  upsertRow("posts", { ...p, body, edited_at: new Date().toISOString() });
+  upsertRow("posts", { ...p, body, edited_at: p.send_at ? p.edited_at : new Date().toISOString() });
   cancelCtx();
   renderMsgs();
   try {
@@ -850,7 +1024,7 @@ async function saveEdit() {
 
 // Tap a quote to see the message it answers (loading earlier messages if needed)
 async function jumpTo(id) {
-  for (let i = 0; i < 10 && !S.posts.some((p) => p.id === id) && S.more; i++) await loadEarlier();
+  for (let i = 0; i < 30 && !S.posts.some((p) => p.id === id) && S.more; i++) await loadEarlier();
   const el = $(`#msgs [data-press="${CSS.escape(id)}"]`);
   if (!el) return toast("That message isn't here anymore");
   el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
@@ -900,6 +1074,341 @@ async function loadEarlier() {
     await fetchQuoted();
   }
   renderMsgs("keep-top");
+}
+
+// ── Voice messages ───────────────────────────────────────────────
+const MAX_VOICE = 5 * 60;
+const BARS = 28;
+const voiceSupported = () => !!(navigator.mediaDevices?.getUserMedia && window.MediaRecorder);
+const voiceKey = (path) => `voice:${path}`;
+const rateLabel = () => `${S.voiceRate || 1}×`;
+function waveBars(id) { // the same little waveform every time for a message
+  let h = 0;
+  for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return Array.from({ length: BARS }, () => { h = (h * 1103515245 + 12345) >>> 0; return 28 + ((h >>> 16) % 73); });
+}
+function voiceHTML(p) {
+  const on = S.playing?.id === p.id, playing = on && !S.playing.paused, prog = on ? S.playing.p : 0;
+  const bars = waveBars(p.id).map((h, i) => `<i style="height:${h}%"${i / BARS < prog ? ' class="on"' : ""}></i>`).join("");
+  return `<div class="bubble voice${playing ? " playing" : ""}" data-press="${p.id}" data-voice="${esc(p.body)}" data-id="${p.id}">
+    <button class="vplay" data-act="voice-play" data-id="${p.id}" data-state="${playing}" aria-label="${playing ? "Pause" : "Play"} voice message">${ico(playing ? "pause" : "play")}</button>
+    <span class="vwave" data-act="voice-seek" data-id="${p.id}" role="slider" aria-label="Position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(prog * 100)}">${bars}</span>
+    <span class="vtime">${mmss(on ? S.playing.t : p.meta?.duration)}</span>
+    <button class="vspeed" data-act="voice-speed" aria-label="Playback speed"${on ? "" : " hidden"}>${rateLabel()}</button>
+  </div>`;
+}
+async function voiceUrls(paths) {
+  const now = Date.now();
+  const need = [...new Set(paths)].filter((p) => !(S.urls.get(voiceKey(p))?.exp > now + MIN));
+  if (!need.length) return;
+  const { data } = await sb.storage.from("voice").createSignedUrls(need, 6 * 3600);
+  for (const d of data || []) if (d.signedUrl) S.urls.set(voiceKey(d.path), { url: d.signedUrl, exp: now + 6 * HOUR });
+}
+// fetch links ahead of time: on iPhone, play() has to happen right in the tap
+function hydrateVoice(root) {
+  const paths = $$("[data-voice]", root).map((e) => e.dataset.voice);
+  if (paths.length) voiceUrls(paths).catch(() => {});
+}
+function updateVoiceUI() {
+  for (const el of $$(".bubble.voice")) {
+    const id = el.dataset.id, on = S.playing?.id === id, playing = on && !S.playing.paused;
+    el.classList.toggle("playing", playing);
+    const btn = el.querySelector(".vplay");
+    if (btn.dataset.state !== String(playing)) {
+      btn.dataset.state = String(playing);
+      btn.innerHTML = ico(playing ? "pause" : "play");
+      btn.setAttribute("aria-label", `${playing ? "Pause" : "Play"} voice message`);
+    }
+    const prog = on ? S.playing.p : 0;
+    el.querySelectorAll(".vwave i").forEach((b, i) => b.classList.toggle("on", i / BARS < prog));
+    el.querySelector(".vwave").setAttribute("aria-valuenow", Math.round(prog * 100));
+    el.querySelector(".vtime").textContent = mmss(on ? S.playing.t : findPost(id)?.meta?.duration);
+    const sp = el.querySelector(".vspeed");
+    sp.hidden = !on;
+    sp.textContent = rateLabel();
+  }
+}
+function audioEl() {
+  if (S.audio) return S.audio;
+  const a = new Audio();
+  a.preload = "auto";
+  const dur = () => (Number.isFinite(a.duration) && a.duration > 0 ? a.duration : S.playing?.dur || 1);
+  a.addEventListener("timeupdate", () => { if (!S.playing) return; S.playing.t = a.currentTime; S.playing.p = Math.min(1, a.currentTime / dur()); updateVoiceUI(); });
+  a.addEventListener("play", () => { if (S.playing) { S.playing.paused = false; updateVoiceUI(); } });
+  a.addEventListener("pause", () => { if (S.playing) { S.playing.paused = true; updateVoiceUI(); } });
+  a.addEventListener("ended", () => { S.playing = null; updateVoiceUI(); });
+  return (S.audio = a);
+}
+function voiceStop() { if (S.audio) S.audio.pause(); S.playing = null; updateVoiceUI(); }
+async function voicePlay(id) {
+  const p = findPost(id);
+  if (!p) return;
+  const a = audioEl();
+  if (S.playing?.id === id) { if (a.paused) a.play().catch(() => {}); else a.pause(); return; }
+  if (S.playing) a.pause();
+  let u = S.urls.get(voiceKey(p.body));
+  if (!u) { await voiceUrls([p.body]).catch(() => {}); u = S.urls.get(voiceKey(p.body)); }
+  if (!u) return toast("Couldn't load the voice message. Check your connection.");
+  S.playing = { id, p: 0, t: 0, paused: false, dur: p.meta?.duration || 0 };
+  a.src = u.url;
+  a.defaultPlaybackRate = a.playbackRate = S.voiceRate || 1;
+  updateVoiceUI();
+  try { await a.play(); } catch (e) { if (S.playing?.id === id) { S.playing.paused = true; updateVoiceUI(); } }
+}
+async function voiceSeek(id, e, el) {
+  const r = el.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  if (S.playing?.id !== id) await voicePlay(id);
+  const a = audioEl(), d = Number.isFinite(a.duration) && a.duration > 0 ? a.duration : S.playing?.dur || 0;
+  if (S.playing?.id === id && d) { a.currentTime = frac * d; S.playing.t = a.currentTime; S.playing.p = frac; updateVoiceUI(); }
+}
+function voiceSpeed() {
+  S.voiceRate = { 1: 1.5, 1.5: 2, 2: 1 }[S.voiceRate || 1];
+  try { localStorage.setItem("mm-voice-rate", S.voiceRate); } catch (e) { /* fine */ }
+  if (S.audio) S.audio.defaultPlaybackRate = S.audio.playbackRate = S.voiceRate;
+  updateVoiceUI();
+}
+try { S.voiceRate = +localStorage.getItem("mm-voice-rate") || 1; } catch (e) { S.voiceRate = 1; }
+
+function pickVoiceType() {
+  for (const t of ["audio/mp4", "audio/mp4;codecs=mp4a.40.2", "audio/aac", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]) {
+    if (MediaRecorder.isTypeSupported?.(t)) return t;
+  }
+  return "";
+}
+async function voiceStart() {
+  if (S.rec || !voiceSupported()) return;
+  voiceStop();
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+  catch (e) { return toast(e?.name === "NotAllowedError" ? "Allow the microphone for M&M's to send voice messages" : "Couldn't use the microphone"); }
+  const type = pickVoiceType();
+  let rec;
+  try { rec = new MediaRecorder(stream, type ? { mimeType: type, audioBitsPerSecond: 64000 } : undefined); }
+  catch (e) { rec = new MediaRecorder(stream); }
+  const r = (S.rec = { rec, stream, chunks: [], start: Date.now(), levels: [], replyTo: S.chatV2 && !S.editing ? S.replyTo : null });
+  rec.ondataavailable = (ev) => { if (ev.data?.size) r.chunks.push(ev.data); };
+  rec.start(250);
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const an = ac.createAnalyser();
+    an.fftSize = 512;
+    ac.createMediaStreamSource(stream).connect(an);
+    Object.assign(r, { ac, an });
+  } catch (e) { /* the timer is enough */ }
+  $(".composer")?.classList.add("recording");
+  if ($("#rec")) $("#rec").hidden = false;
+  r.timer = setInterval(recTick, 100);
+  navigator.vibrate?.(10);
+}
+function recTick() {
+  const r = S.rec;
+  if (!r) return;
+  const s = (Date.now() - r.start) / 1000;
+  const t = $("#rec-time");
+  if (t) t.textContent = mmss(s);
+  if (r.an) {
+    const data = new Uint8Array(r.an.fftSize);
+    r.an.getByteTimeDomainData(data);
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v - 128));
+    r.levels = [...r.levels, Math.min(1, (peak / 128) * 2.2)].slice(-24);
+    $$("#rec-level i").forEach((b, i) => { const v = r.levels[i - (24 - r.levels.length)] ?? 0; b.style.height = `${Math.round(12 + v * 88)}%`; });
+  }
+  if (s >= MAX_VOICE) { toast("Voice messages can be up to 5 minutes"); voiceFinish(true); }
+}
+async function voiceFinish(send) {
+  const r = S.rec;
+  if (!r) return;
+  S.rec = null;
+  clearInterval(r.timer);
+  const duration = (Date.now() - r.start) / 1000;
+  const stopped = new Promise((res) => { r.rec.onstop = res; setTimeout(res, 1500); });
+  try { if (r.rec.state !== "inactive") r.rec.stop(); } catch (e) { /* already stopped */ }
+  await stopped;
+  r.stream.getTracks().forEach((tr) => tr.stop());
+  r.ac?.close?.().catch(() => {});
+  $(".composer")?.classList.remove("recording");
+  if ($("#rec")) $("#rec").hidden = true;
+  if (!send) return;
+  if (duration < 1 || !r.chunks.length) return toast("Too short to send");
+  const type = (r.rec.mimeType || r.chunks[0]?.type || "audio/mp4").split(";")[0];
+  if (r.replyTo && S.replyTo === r.replyTo) { S.replyTo = null; renderComposeCtx(); }
+  await sendVoice(new Blob(r.chunks, { type }), type, duration, r.replyTo);
+}
+async function sendVoice(blob, type, duration, replyTo) {
+  S.sendingVoice++;
+  renderMsgs(true);
+  try {
+    const ext = /mp4|aac|m4a/.test(type) ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
+    const path = `${uuid()}.${ext}`;
+    const { error } = await sb.storage.from("voice").upload(path, blob, { contentType: type });
+    if (error) throw error;
+    const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "voice", body: path, meta: { duration: Math.round(duration * 10) / 10 }, ...(replyTo ? { reply_to: replyTo } : {}) }).select().single());
+    upsertRow("posts", row);
+  } catch (e) {
+    toast("Couldn't send the voice message. Check your connection and try again.");
+  } finally {
+    S.sendingVoice--;
+    renderMsgs(true);
+  }
+}
+
+// ── Send later, in her time ──────────────────────────────────────
+function openSendLater(id = null) {
+  const tz = S.partner.tz, now = new Date(), hp = zoneParts(now, tz), mins = hp.h * 60 + hp.mi;
+  const at = (days, h) => { const b = zoneParts(new Date(now.getTime() + days * DAY), tz); return zonedDate(b.y, b.mo, b.d, h, 0, tz); };
+  const opts = [
+    ["When she wakes up", mins < 7 * 60 + 30 ? at(0, 8) : at(1, 8)],
+    ["Her evening", mins < 18 * 60 + 30 ? at(0, 19) : at(1, 19)],
+    ["In an hour", new Date(Math.ceil((now.getTime() + HOUR) / (5 * MIN)) * 5 * MIN)],
+  ];
+  const idAttr = id ? ` data-id="${id}"` : "";
+  const p = id && S.posts.find((x) => x.id === id);
+  const start = p ? new Date(p.send_at) : opts[0][1];
+  openSheet(`
+    <h3>${id ? "Change the time" : "Send later"}</h3>
+    ${id ? "" : `<p class="muted sched-note">${esc(S.partner.name)} gets it at the time you pick, with a notification. Until then only you can see it.</p>`}
+    <div class="sched-opts">${opts.map(([label, d]) => `<button class="sched-opt" data-act="sched-pick" data-at="${d.toISOString()}"${idAttr}><b>${label}</b><span>${esc(herWhen(d))} · ${esc(myWhen(d))}</span></button>`).join("")}</div>
+    <div class="sched-custom">
+      <b>Or pick a time in ${esc(S.partner.city)}</b>
+      <div class="sched-inputs"><input class="in" type="date" id="sched-date" value="${dayKey(start, tz)}" min="${dayKey(now, tz)}" aria-label="Day, ${esc(S.partner.city)} time"><input class="in" type="time" id="sched-time" value="${toTimeInput(start, tz)}" aria-label="Time, ${esc(S.partner.city)} time"></div>
+      <span class="fine" id="sched-preview"></span>
+      <button class="btn" data-act="sched-custom"${idAttr}>${ico("clock")}${id ? "Change time" : "Schedule"}</button>
+    </div>`);
+  updateSchedPreview();
+}
+const customSchedDate = () => fromInputs($("#sched-date")?.value, $("#sched-time")?.value, S.partner.tz);
+function updateSchedPreview() {
+  const el = $("#sched-preview"), d = customSchedDate();
+  if (!el) return;
+  el.textContent = !d ? "" : d.getTime() <= Date.now() + MIN ? "Pick a time in the future" : `Arrives ${herWhen(d)} · ${myWhen(d)}`;
+}
+async function scheduleNote(d) {
+  const ta = $("#composer"), body = ta?.value.trim();
+  closeSheet();
+  if (!body) return;
+  const replyTo = S.chatV2 ? S.replyTo : null;
+  ta.value = "";
+  S.draft = "";
+  S.replyTo = null;
+  renderComposeCtx();
+  autosize(ta);
+  syncComposer();
+  try {
+    const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "note", body, send_at: d.toISOString(), ...(replyTo ? { reply_to: replyTo } : {}) }).select().single(), "Couldn't schedule it. Check your connection and try again.");
+    upsertRow("posts", row);
+    renderMsgs(true);
+    toast(`Scheduled · arrives ${herWhen(d)}`);
+  } catch (e) {
+    ta.value = body;
+    S.draft = body;
+    autosize(ta);
+    syncComposer();
+    if (replyTo) { S.replyTo = replyTo; renderComposeCtx(); }
+  }
+}
+async function reschedule(id, d) {
+  closeSheet();
+  const p = S.posts.find((x) => x.id === id);
+  if (!p) return;
+  const before = { ...p };
+  upsertRow("posts", { ...p, send_at: d.toISOString() });
+  renderMsgs();
+  try {
+    upsertRow("posts", await run(sb.from("posts").update({ send_at: d.toISOString() }).eq("id", id).select().single(), "Couldn't change the time. Check your connection."));
+    renderMsgs();
+    toast(`Arrives ${herWhen(d)}`);
+  } catch (e) { upsertRow("posts", before); renderMsgs(); }
+}
+async function sendNow(id) {
+  closeSheet();
+  const p = S.posts.find((x) => x.id === id);
+  if (!p) return;
+  const before = { ...p };
+  upsertRow("posts", { ...p, send_at: null, created_at: new Date().toISOString() });
+  renderMsgs(true);
+  try {
+    upsertRow("posts", await run(sb.from("posts").update({ send_at: null }).eq("id", id).select().single(), "Couldn't send it. Check your connection."));
+    renderMsgs(true);
+  } catch (e) { upsertRow("posts", before); renderMsgs(); }
+}
+
+// ── Saved messages (you both see what either of you kept) ────────
+const savedBy = (id) => [...new Set(S.saved.filter((x) => x.post_id === id).map((x) => x.saved_by))];
+const savedCount = () => new Set(S.saved.map((x) => x.post_id)).size;
+async function toggleSave(id) {
+  closeSheet();
+  const mine = S.saved.find((x) => x.post_id === id && x.saved_by === S.me.name);
+  if (mine) {
+    removeRow("saved", mine);
+    refresh("saved");
+    try { await run(sb.from("saved").delete().eq("post_id", id).eq("saved_by", S.me.name)); toast("Removed from saved"); }
+    catch (e) { upsertRow("saved", mine); refresh("saved"); }
+  } else {
+    const row = { post_id: id, saved_by: S.me.name, created_at: new Date().toISOString() };
+    upsertRow("saved", row);
+    refresh("saved");
+    try { await run(sb.from("saved").insert({ post_id: id })); toast("Saved ★"); }
+    catch (e) { removeRow("saved", row); refresh("saved"); }
+  }
+}
+function savedList() {
+  const latest = new Map();
+  for (const x of S.saved.slice().sort((a, b) => b.created_at.localeCompare(a.created_at))) if (!latest.has(x.post_id)) latest.set(x.post_id, x);
+  return [...latest.keys()].map(findPost).filter(Boolean);
+}
+function savedItemHTML(p) {
+  const d = new Date(p.created_at), who = p.author === S.me.name ? "You" : esc(p.author);
+  const by = savedBy(p.id), byTxt = by.length > 1 ? "both of you" : by[0] === S.me.name ? "you" : esc(by[0]);
+  const what = p.kind === "photo" ? `<span class="q-photo"><img data-path="${esc(p.body)}" alt="">Photo</span>`
+    : p.kind === "voice" ? `<span class="q-photo">${ico("mic")}${esc(gist(p))}</span>` : `<span class="si-text">${esc(snip(p.body, 220))}</span>`;
+  return `<button class="saved-item" data-act="goto-msg" data-id="${p.id}"><span class="si-top"><b>${who}</b> · ${esc(fDay(d))}, ${esc(fTime(d))}</span>${what}<span class="si-by">${ico("star")}Saved by ${byTxt}</span></button>`;
+}
+function openSavedSheet() {
+  const list = savedList();
+  openSheet(`<h3>Saved messages</h3>
+    ${list.length ? `<div class="saved-list">${list.map(savedItemHTML).join("")}</div>`
+      : `<p class="muted">Press and hold a message and tap <b>Save</b> to keep it here. You both see what either of you saves.</p>`}
+    <div class="sheet-actions"><button class="btn ghost" data-act="sheet-close">Close</button></div>`);
+  hydratePhotos($("#sheet-root"));
+}
+function savedCardHTML() {
+  if (!S.chatV3) return "";
+  const list = savedList();
+  return `<div class="card saved-card">
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="notif-main">${ico("star")}<div><b>Saved messages</b><span>${list.length ? `${list.length} kept` : "Hold a message in the chat and tap Save"}</span></div></div>
+      ${list.length ? `<button class="btn soft small" data-act="saved-list">See all</button>` : ""}
+    </div>
+    ${list.length ? `<div class="saved-list mini">${list.slice(0, 2).map(savedItemHTML).join("")}</div>` : ""}
+  </div>`;
+}
+
+// ── Search (the whole chat, not just what's loaded) ──────────────
+function openSearch() {
+  openSheet(`<h3>Search messages</h3>
+    <input class="in" id="search-q" type="search" placeholder="A word or a few" autocomplete="off" enterkeyhint="search" aria-label="Search messages">
+    <div class="search-res" id="search-res" aria-live="polite"></div>`);
+}
+function markMatch(text, q) {
+  const t = String(text || ""), i = t.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return esc(snip(t, 160));
+  const from = Math.max(0, i - 50), to = Math.min(t.length, i + q.length + 90);
+  return `${from ? "…" : ""}${esc(t.slice(from, i))}<mark>${esc(t.slice(i, i + q.length))}</mark>${esc(t.slice(i + q.length, to))}${to < t.length ? "…" : ""}`;
+}
+async function runSearch(raw) {
+  const box = $("#search-res"), q = String(raw || "").trim();
+  if (!box) return;
+  if (q.length < 2) { box.innerHTML = ""; return; }
+  const seq = ++S.searchSeq;
+  const { data, error } = await sb.from("posts").select("*").eq("kind", "note").ilike("body", `%${q.replace(/[\\%_]/g, (c) => "\\" + c)}%`).order("created_at", { ascending: false }).limit(50);
+  if (seq !== S.searchSeq || !$("#search-res")) return;
+  if (error) { box.innerHTML = `<p class="muted">Couldn't search. Check your connection.</p>`; return; }
+  for (const p of data) if (!S.posts.some((x) => x.id === p.id)) S.quoted.set(p.id, p);
+  box.innerHTML = data.length
+    ? data.map((p) => { const d = new Date(p.created_at); return `<button class="saved-item" data-act="goto-msg" data-id="${p.id}"><span class="si-top"><b>${p.author === S.me.name ? "You" : esc(p.author)}</b> · ${esc(fDay(d))}, ${esc(fTime(d))}${p.send_at ? " · scheduled" : ""}</span><span class="si-text">${markMatch(p.body, q)}</span></button>`; }).join("")
+    : `<p class="muted">No messages with “${esc(q)}”</p>`;
 }
 
 // ═══ Trips ═══════════════════════════════════════════════════════
@@ -1474,7 +1983,7 @@ function addEmoji(e) {
   if (S.editing) S.editText = ta.value;
   else S.draft = ta.value;
   autosize(ta);
-  $(".send").disabled = !ta.value.trim();
+  syncComposer();
   rememberEmoji(e);
 }
 
@@ -1665,7 +2174,7 @@ const EGGS = [
       "je t'aime", "jtaime", "jtm", "je t'adore", "te amo", "te quiero", "ti amo", "ti voglio bene", "обичам те") },
 ];
 function builtInEggs(text, mine = false) {
-  const raw = String(text || ""), t = fold(raw);
+  const raw = String(text || "").replace(/\b(?:https?:\/\/|www\.)\S+/gi, " "), t = fold(raw); // links don't count
   const hits = EGGS.filter((e) => (!e.mine || mine) && (e.re ? e.re.test(t) : e.test(t, raw)) && (!e.when || e.when())).slice(0, 3);
   if (!hits.length) return;
   const mode = hits[0].fx[2] || "fall";
@@ -2252,6 +2761,7 @@ function viewUs() {
     ${standalone ? "" : `<div class="card install"><b>Put M&amp;M's on your Home Screen</b><p class="muted" style="font-size:14px">In Safari, tap the Share button, then <b>Add to Home Screen</b>. It then opens like a normal app.</p></div>`}
     <div class="sec-h"><h2>Our story</h2><button class="btn small" data-act="moment-new">${ico("plus")}Add memory</button></div>
     ${storyHTML()}
+    ${savedCardHTML()}
     <div class="card notif-card">
       <div class="row" style="justify-content:space-between;align-items:center">
         <div class="notif-main">${ico("bell")}<div><b>Notifications</b><span>${esc(pushStatusText())}</span></div></div>
@@ -2364,6 +2874,25 @@ document.addEventListener("click", async (e) => {
       case "edit-msg": return startEdit(id);
       case "ctx-cancel": cancelCtx(); return $("#composer")?.focus();
       case "jump": return await jumpTo(id);
+      case "goto-msg": closeSheet(); if (S.tab !== "chat") setTab("chat"); return await jumpTo(id);
+      case "save-msg": return await toggleSave(id);
+      case "saved-list": return openSavedSheet();
+      case "chat-search": return openSearch();
+      case "send-later": return openSendLater();
+      case "sched-change": return openSendLater(id);
+      case "sched-pick": return id ? await reschedule(id, new Date(el.dataset.at)) : await scheduleNote(new Date(el.dataset.at));
+      case "sched-custom": {
+        const d = customSchedDate();
+        if (!d || d.getTime() <= Date.now() + MIN) return toast("Pick a time in the future");
+        return id ? await reschedule(id, d) : await scheduleNote(d);
+      }
+      case "sched-now": return await sendNow(id);
+      case "voice-start": return await voiceStart();
+      case "voice-send": return await voiceFinish(true);
+      case "voice-cancel": return await voiceFinish(false);
+      case "voice-play": return await voicePlay(id);
+      case "voice-seek": return await voiceSeek(id, e, el);
+      case "voice-speed": return voiceSpeed();
       case "del-msg": return await deleteMsg(el);
       case "copy": return copyText(el.dataset.text);
       case "trip-new": return openTripSheet(null);
@@ -2465,8 +2994,10 @@ document.addEventListener("input", (e) => {
     if (S.editing) S.editText = el.value;
     else S.draft = el.value;
     autosize(el);
-    $(".send").disabled = !el.value.trim();
+    syncComposer();
   }
+  if (el.id === "search-q") { clearTimeout(S.searchT); S.searchT = setTimeout(() => runSearch(el.value), 250); }
+  if (el.id === "sched-date" || el.id === "sched-time") updateSchedPreview();
   if (el.dataset.plan) queuePlan(el);
   if (el.id === "call-date" || el.id === "call-time") updateCallPreview();
 });
@@ -2525,8 +3056,10 @@ document.addEventListener("focusout", (e) => { if (e.target.id === "composer") S
 
 // Coming back to the app after a while: catch up
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && S.rec) voiceFinish(false); // a recording doesn't survive leaving the app
   if (document.visibilityState === "visible" && S.started && S.me) {
-    loadAll().then(() => { refresh("all"); checkDrop(); greetToday(); seekOnOpen(); }).catch(() => {});
+    // back in the chat: show where the new messages start
+    loadAll().then(() => { if (S.tab === "chat") showChatUpdates(); else refresh("all"); checkDrop(); greetToday(); seekOnOpen(); }).catch(() => {});
     navigator.clearAppBadge?.().catch(() => {});
     shareLocation(false);
   }

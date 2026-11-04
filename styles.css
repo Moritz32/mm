@@ -532,3 +532,87 @@ body[data-theme="love"] .top { background: linear-gradient(135deg, #2A1240 0%, #
 .compose-ctx .icon-btn { width: 36px; height: 36px; }
 .compose-ctx:not([hidden]) + .composer { border-top: 0; }
 .composer.editing label.icon-btn, .composer.editing [data-act="send-heart"] { display: none; }
+
+/* ── Search and saved, above the chat ───────── */
+.chat-tools { flex: none; display: flex; gap: 8px; padding: 8px max(12px, env(safe-area-inset-right, 0px)) 6px max(12px, env(safe-area-inset-left, 0px)); border-bottom: 1px solid var(--line); background: var(--bg); }
+.chat-tools button { appearance: none; border: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; min-height: 34px; border-radius: 999px; background: var(--surface); color: var(--muted); font: 700 14px/1 var(--round); padding: 0 12px; }
+.chat-tools svg { width: 16px; height: 16px; flex: none; }
+.chat-search { flex: 1 1 auto; min-width: 0; }
+.chat-search span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-saved { flex: none; color: var(--pink) !important; }
+.search-res, .saved-list { display: grid; gap: 8px; margin-top: 12px; max-height: 58vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.saved-list.mini { max-height: none; margin-top: 10px; }
+.saved-item { appearance: none; border: 0; cursor: pointer; text-align: left; display: grid; gap: 4px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink); font: 600 15px/1.35 var(--round); }
+.saved-card .saved-item { background: var(--surface); }
+.si-top { font: 700 12.5px/1.3 var(--round); color: var(--muted); }
+.si-top b { color: var(--ink); }
+.si-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.si-by { display: inline-flex; align-items: center; gap: 5px; font: 700 12px/1.2 var(--round); color: var(--pink); }
+.si-by svg { width: 12px; height: 12px; fill: currentColor; }
+.saved-item mark { background: rgba(255, 158, 184, 0.28); color: var(--ink); border-radius: 4px; padding: 0 2px; }
+.saved-card .notif-main svg { color: var(--pink); }
+.star-mark svg { width: 11px; height: 11px; vertical-align: -1px; color: var(--pink); fill: currentColor; }
+.msg-actions .btn.on { color: var(--pink); }
+.msg-actions .btn.on svg { fill: currentColor; }
+/* both times, at the top of the message sheet */
+.msg-when { display: flex; align-items: center; gap: 7px; margin: -2px 2px 12px; font: 700 13px/1.35 var(--round); color: var(--muted); }
+.msg-when svg { width: 15px; height: 15px; flex: none; color: var(--pink); }
+
+/* ── New messages line ───────────────────────── */
+.new-sep { display: flex; align-items: center; gap: 10px; margin: 10px 4px 6px; font: 800 12px/1 var(--round); letter-spacing: 0.06em; text-transform: uppercase; color: var(--pink); }
+.new-sep::before, .new-sep::after { content: ""; flex: 1; height: 1px; background: rgba(255, 158, 184, 0.45); }
+
+/* ── Links and double-tap ♥ ──────────────────── */
+.bubble a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; -webkit-touch-callout: default; }
+.bubble { position: relative; }
+.love-pop { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -23px 0 0 -23px; color: #fff; pointer-events: none; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35)); animation: lovepop 0.85s ease-out forwards; }
+.love-pop svg { width: 100%; height: 100%; color: #FF5C8A; }
+@keyframes lovepop { 0% { transform: scale(0.2); opacity: 0; } 25% { transform: scale(1.15); opacity: 1; } 55% { transform: scale(0.95); } 100% { transform: scale(1) translateY(-14px); opacity: 0; } }
+
+/* ── Composer: mic when empty, clock while typing ── */
+.mic-btn { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--pink); color: var(--pink-ink); display: grid; place-items: center; flex: none; cursor: pointer; }
+.mic-btn svg { width: 21px; height: 21px; }
+.composer.can-voice:not(.has-text):not(.editing) > .send { display: none; }
+.composer.has-text .mic-btn, .composer.editing .mic-btn { display: none; }
+.sched-btn { display: none; }
+.composer.has-text:not(.editing) .sched-btn { display: inline-grid; }
+.composer.has-text [data-act="send-heart"] { display: none; }
+/* recording */
+.composer { position: relative; }
+.composer.recording > :not(.rec) { visibility: hidden; }
+.rec { position: absolute; inset: 8px max(10px, env(safe-area-inset-right, 0px)) 8px max(10px, env(safe-area-inset-left, 0px)); display: flex; align-items: center; gap: 8px; background: var(--bg); }
+.rec[hidden] { display: none; }
+.rec .icon-btn { color: var(--warn); }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #FF5C6C; flex: none; animation: recblink 1s ease-in-out infinite; }
+@keyframes recblink { 50% { opacity: 0.25; } }
+.rec-time { font: 800 15px/1 var(--round); font-variant-numeric: tabular-nums; min-width: 38px; }
+.rec-level { flex: 1 1 auto; min-width: 0; height: 30px; display: flex; align-items: center; gap: 3px; overflow: hidden; }
+.rec-level i { flex: 1 1 0; max-width: 5px; height: 12%; border-radius: 3px; background: var(--pink); transition: height 0.09s linear; }
+
+/* ── Voice message bubble ────────────────────── */
+.bubble.voice { display: flex; align-items: center; gap: 9px; padding: 7px 12px 7px 7px; width: min(68vw, 270px); }
+.vplay { appearance: none; border: 0; cursor: pointer; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none; background: rgba(255, 255, 255, 0.92); color: #2A2350; }
+.m.mine .vplay { color: #7A3E92; }
+.vplay svg { width: 18px; height: 18px; }
+.vwave { flex: 1 1 auto; min-width: 0; height: 30px; display: flex; align-items: center; gap: 2px; cursor: pointer; }
+.vwave i { flex: 1 1 0; border-radius: 2px; background: rgba(255, 255, 255, 0.38); }
+.vwave i.on { background: #fff; }
+.vtime { font: 700 12.5px/1 var(--round); font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.85); min-width: 30px; text-align: right; }
+.vspeed { appearance: none; border: 0; cursor: pointer; padding: 3px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.18); color: #fff; font: 800 12px/1 var(--round); flex: none; }
+.q-photo svg { width: 16px; height: 16px; color: var(--pink); flex: none; }
+
+/* ── Scheduled messages ──────────────────────── */
+.sched-sep { display: inline-flex; align-items: center; gap: 6px; color: var(--pink); }
+.sched-sep svg { width: 13px; height: 13px; }
+.m.pending .bubble { opacity: 0.62; border: 1.5px dashed rgba(255, 255, 255, 0.35); }
+.m.pending .meta { display: inline-flex; align-items: center; gap: 4px; color: var(--pink); }
+.m.pending .meta svg { width: 12px; height: 12px; }
+.sched-note { font-size: 14px; margin: -4px 0 12px; }
+.sched-opts { display: grid; gap: 8px; }
+.sched-opt { appearance: none; border: 0; cursor: pointer; text-align: left; display: grid; gap: 3px; padding: 11px 14px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink); }
+.sched-opt b { font: 800 15px/1.2 var(--round); }
+.sched-opt span { font: 600 13.5px/1.3 var(--round); color: var(--muted); }
+.sched-custom { display: grid; gap: 8px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.sched-custom > b { font: 800 14px/1.2 var(--round); }
+.sched-inputs { display: grid; grid-template-columns: 1.3fr 1fr; gap: 8px; }
+.sched-custom .fine { min-height: 1.3em; }
