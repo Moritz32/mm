@@ -1435,44 +1435,53 @@ function rain(sym, count = 24, mode = "fall") {
 }
 
 // Little things that happen without being announced
-const LOVE_WORDS = /(^|[^\p{L}])(i love you|love you|ich liebe dich|hab dich lieb|je t['’]?aime|te amo|ti amo)($|[^\p{L}])/iu;
-const word = (w) => new RegExp(`(^|[^\\p{L}])(${w})($|[^\\p{L}])`, "iu");
+// Text is folded first: lower case, no accents, ß → ss, curly apostrophes straight.
+const fold = (s) => String(s || "").toLowerCase().replace(/ß/g, "ss").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[’‘`´]/g, "'");
+// A list of wordings → one pattern. Every letter may repeat ("loveee youuu", "goood night"),
+// a space may be left out ("goodnight"), an apostrophe may be left out or be a space ("je taime"),
+// and a match never starts or ends in the middle of a word.
+const wordings = (...list) => new RegExp(`(^|[^\\p{L}])(${list.map((w) => fold(w).replace(/\p{L}/gu, "$&+").replace(/'/g, "['\\s]?").replace(/ /g, "\\s*")).join("|")})(?=$|[^\\p{L}])`, "u");
+const isNight = () => { const h = new Date().getHours(); return h >= 20 || h < 4; };
+const isMorning = () => { const h = new Date().getHours(); return h >= 4 && h < 12; };
+// When a message fits several, they mix into one shower (the first one's style); the first note wins.
 const EGGS = [
   // using the word of the day, or a word your partner taught you, in your own message
-  { mine: true, test: (t) => usedWord(t), run: (t) => { const w = usedWord(t); rain(["✨", "📖"], 16, "up"); toast(w.from ? `📖 ${w.from} taught you “${w.word}” ♥` : `📖 Nice, today's word: “${w.word}”`); } },
-  { test: (t) => word("paris").test(t), run: () => {
-    rain(["💋", "🗼", "♥"], 21, "up");
-    const k = S.moments.find((m) => m.kind === "kiss");
-    if (k) toast(`${k.title} · ${fDate(new Date(k.happened_on + "T12:00:00"))} ♥`);
-  } },
-  { test: (t) => word("munich|münchen|muenchen").test(t), run: () => {
-    rain(["🥨", "🍺", "♥"], 18, "up");
-    const met = S.moments.find((m) => m.kind === "met");
-    if (met) toast(`Where it all began · ${fDate(new Date(met.happened_on + "T12:00:00"))} ♥`);
-  } },
-  { test: (t) => word("boston").test(t), run: () => {
-    rain(["🦆", "🦞", "☕"], 18, "up");
-    const ph = tripPhase();
-    if (ph.kind === "countdown") toast(`${plural(ph.days, "day")} to go ✈️`);
-  } },
-  { test: (t) => word("helau|alaaf").test(t), run: () => rain(["🎭", "🎉", "🎊"], 26) },
-  { test: (t) => word("prost|cheers|santé|sante|zum wohl").test(t), run: () => rain(["🍻", "🥂"], 14, "up") },
-  { test: (t) => /(^|[^\p{L}])m ?& ?m'?s?($|[^\p{L}])/iu.test(t), run: () => rain(["🔴", "🟡", "🟢", "🔵", "🟠", "🟤"], 36) },
-  { test: (t) => /miss you|vermisse dich|fehlst mir|tu me manques/iu.test(t), run: () => {
-    rain("♥", 14, "up");
-    const d = distance(), ph = tripPhase();
-    if (d && !d.together) toast(`${d.value.toLocaleString()} ${d.unit} apart${ph.kind === "countdown" ? `, only ${plural(ph.days, "day")} to go` : ""} ♥`);
-  } },
-  { test: (t) => /good ?night|gute nacht|bonne nuit|schlaf gut|sleep well|nighty/iu.test(t), when: () => { const h = new Date().getHours(); return h >= 20 || h < 4; }, run: () => rain(["🌙", "✨", "⭐"], 18) },
-  { test: (t) => /good ?morning|guten morgen|bonjour|morgen ☀|^gm\b/iu.test(t), when: () => { const h = new Date().getHours(); return h >= 4 && h < 12; }, run: () => rain(["☀️", "🌤️", "☕"], 14, "up") },
-  { test: (t) => /kiss|kuss|küsschen|bisou|😘|💋/iu.test(t), run: () => rain(["💋", "😘"], 20) },
-  { test: (t) => LOVE_WORDS.test(t), run: () => rain("♥", 28) },
+  { mine: true, test: (t, raw) => usedWord(raw), fx: [["✨", "📖"], 16, "up"],
+    note: (raw) => { const w = usedWord(raw); return w && (w.from ? `📖 ${w.from} taught you “${w.word}” ♥` : `📖 Nice, today's word: “${w.word}”`); } },
+  { name: "paris", re: wordings("paris", "eiffel", "first kiss", "premier bisou", "erster kuss"), fx: [["💋", "🗼", "♥"], 21, "up"],
+    note: () => { const k = S.moments.find((m) => m.kind === "kiss"); return k && `${k.title} · ${fDate(new Date(k.happened_on + "T12:00:00"))} ♥`; } },
+  { name: "munich", re: wordings("munich", "münchen", "muenchen", "oktoberfest", "wiesn"), fx: [["🥨", "🍺", "♥"], 18, "up"],
+    note: () => { const met = S.moments.find((m) => m.kind === "met"); return met && `Where it all began · ${fDate(new Date(met.happened_on + "T12:00:00"))} ♥`; } },
+  { name: "boston", re: wordings("boston", "beantown", "massachusetts"), fx: [["🦆", "🦞", "☕"], 18, "up"],
+    note: () => { const ph = tripPhase(); return ph.kind === "countdown" && `${plural(ph.days, "day")} to go ✈️`; } },
+  { name: "karneval", re: wordings("helau", "alaaf", "karneval", "fasching", "fastnacht", "kamelle", "rosenmontag", "carnaval", "carnival"), fx: [["🎭", "🎉", "🎊"], 26] },
+  { name: "cheers", re: wordings("prost", "prosit", "cheers", "santé", "zum wohl", "salud", "cin cin", "chin chin", "tchin", "skål", "nazdrave", "наздраве", "🍻", "🥂"), fx: [["🍻", "🥂"], 14, "up"] },
+  { name: "mm", re: wordings("m & m('s|s)?", "m and m('s|s)?", "m n m('s|s)?"), fx: [["🔴", "🟡", "🟢", "🔵", "🟠", "🟤"], 36] },
+  { name: "miss", re: wordings("miss(ed|ing|in')? (you|u|ya)", "vermiss(e)? dich", "fehlst mir", "tu me manque(s)?", "tu m'manque(s)?", "te extraño", "te echo de menos", "mi manchi", "липсваш ми"), fx: [["♥"], 14, "up"],
+    note: () => { const d = distance(), ph = tripPhase(); return d && !d.together && `${d.value.toLocaleString()} ${d.unit} apart${ph.kind === "countdown" ? `, only ${plural(ph.days, "day")} to go` : ""} ♥`; } },
+  { name: "night", when: isNight, fx: [["🌙", "✨", "⭐"], 18],
+    re: wordings("good night", "nite", "gn", "g'night", "^night", "night night", "nighty( night)?", "sleep well", "sleep tight", "sweet dreams",
+      "gute nacht", "gute n8", "n8", "gn8", "nachti", "schlaf gut", "schlaf schön", "träum süß", "träum schön", "träum was schönes", "süße träume",
+      "bonne nuit", "bne nuit", "douce nuit", "dors bien", "beaux rêves", "buenas noches", "buona notte", "лека нощ") },
+  { name: "morning", when: isMorning, fx: [["☀️", "🌤️", "☕"], 14, "up"],
+    re: wordings("good morning", "good mornin'", "gm", "g'morning", "^morning", "^mornin'", "rise and shine",
+      "guten morgen", "gumo", "moin", "morgen ☀", "bonjour", "bon matin", "buenos días", "buongiorno", "добро утро") },
+  { name: "kiss", fx: [["💋", "😘"], 20],
+    re: wordings("kiss(es|ed|ing|y)?", "xoxo", "xx", "mua(h)?", "mwa(h)?", "smooch(es)?", "kuss", "küsse", "küsschen", "kussi", "bussi", "busserl", "schmatz",
+      "bisou(s)?", "bises", "biz", "beso(s)?", "bacio", "baci", "целувки", "😘", "😗", "😙", "😚", "😽", "💋", "💏") },
+  { name: "love", fx: [["♥"], 28],
+    re: wordings("i love you", "love (you|u|ya)", "luv (you|u|ya)", "ily", "ilysm", "ilu", "adore you", "<3",
+      "ich liebe dich", "liebe dich", "lieb dich", "hab dich (so )?lieb", "hdl", "hdgdl",
+      "je t'aime", "jtaime", "jtm", "je t'adore", "te amo", "te quiero", "ti amo", "ti voglio bene", "обичам те") },
 ];
-// The first little thing that fits a message happens; nothing is announced beforehand
 function builtInEggs(text, mine = false) {
-  const t = String(text || "");
-  const egg = EGGS.find((e) => (!e.mine || mine) && e.test(t) && (!e.when || e.when()));
-  if (egg) egg.run(t);
+  const raw = String(text || ""), t = fold(raw);
+  const hits = EGGS.filter((e) => (!e.mine || mine) && (e.re ? e.re.test(t) : e.test(t, raw)) && (!e.when || e.when())).slice(0, 3);
+  if (!hits.length) return;
+  const mode = hits[0].fx[2] || "fall";
+  rain([...new Set(hits.flatMap((e) => e.fx[0]))], Math.min(36, Math.max(...hits.map((e) => e.fx[1])) + 6 * (hits.length - 1)), mode);
+  for (const e of hits) { const n = e.note && e.note(raw); if (n) { toast(n); break; } }
+  return hits.map((e) => e.name || "word");
 }
 
 // 11:11 · make a wish (once per day, morning or evening, when the app is open)
