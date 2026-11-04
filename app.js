@@ -47,6 +47,7 @@ const PATHS = {
   book: '<path d="M5 4.5h11.5a1.5 1.5 0 0 1 1.5 1.5v14H7a2 2 0 0 1-2-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/><path d="M9 8.5h5"/>',
   speaker: '<path d="M4 9.5h3.5L12 6v12l-4.5-3.5H4z"/><path d="M15.5 9.3a3.8 3.8 0 0 1 0 5.4M18.2 6.8a7.5 7.5 0 0 1 0 10.4"/>',
   smile: '<circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.3a4.6 4.6 0 0 0 6.8 0"/><circle cx="9.3" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="14.7" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
+  reply: '<path d="M9.5 6.5 4 12l5.5 5.5"/><path d="M4.5 12H14a6 6 0 0 1 6 6v.5"/>',
   photo: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="9" cy="10" r="1.8"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/>',
 };
 const ico = (name, cls = "i") =>
@@ -111,6 +112,7 @@ const toTimeInput = (d, tz) => { const p = zoneParts(d, tz); return `${String(p.
 const S = {
   started: false, me: null, partner: null, members: [],
   posts: [], reactions: [], more: false, msgCount: 0,
+  chatV2: false, replyTo: null, editing: null, editText: null, draftKeep: "", quoted: new Map(), // replies and edits
   trips: [], trip_days: [], ideas: [], packing: [], availability: [], calls: [], moments: [], locations: [], surprises: [], words: [],
   tab: tabFromHash(), tripId: null, tripSub: "plan", packOwner: null,
   urls: new Map(), uploading: 0, channel: null, prefill: null,
@@ -146,7 +148,13 @@ function removeRow(t, row) {
   const before = S[t].length;
   S[t] = S[t].filter((r) => KEYS[t](r) !== k);
   if (t === "posts" && S[t].length < before && row.kind !== "heart") S.msgCount = Math.max(0, S.msgCount - 1);
-  if (t === "posts") S.reactions = S.reactions.filter((r) => r.post_id !== row.id);
+  if (t === "posts") {
+    S.reactions = S.reactions.filter((r) => r.post_id !== row.id);
+    // replies to it lose their quote (the database does the same), and a reply or edit in progress stops
+    for (const p of S.posts) if (p.reply_to === row.id) p.reply_to = null;
+    S.quoted.delete(row.id);
+    if (S.replyTo === row.id || S.editing === row.id) cancelCtx();
+  }
 }
 const member = (name) => S.members.find((m) => m.name === name);
 const otherOf = (name) => S.members.find((m) => m.name !== name);
@@ -306,12 +314,25 @@ async function loadAll() {
     sb.from("locations").select("*").then((r) => r.data || []),
     sb.from("surprises").select("*").then((r) => r.data || [], () => []),
     sb.from("words").select("*").order("created_at").then((r) => r.data || [], () => []),
-  ]);
+    // replies and edits light up once the database has them (update 8)
+    sb.from("posts").select("reply_to,edited_at").limit(1).then((r) => !r.error, () => false),
+  ]).then((r) => { S.chatV2 = r.pop(); return r; });
   S.posts = posts.slice().reverse();
   S.more = posts.length === PAGE;
   Object.assign(S, { trips, trip_days: days, ideas, packing, availability, calls, moments, locations, surprises, words });
   S.msgCount = count?.count ?? posts.filter((p) => p.kind === "note").length;
   S.reactions = posts.length ? await run(sb.from("reactions").select("*").in("post_id", posts.map((p) => p.id))) : [];
+  await fetchQuoted();
+}
+
+// Replies to messages older than what's loaded still show what they answer
+async function fetchQuoted() {
+  if (!S.chatV2) return false;
+  const need = [...new Set(S.posts.map((p) => p.reply_to).filter((id) => id && !S.quoted.has(id) && !S.posts.some((x) => x.id === id)))];
+  if (!need.length) return false;
+  const { data } = await sb.from("posts").select("*").in("id", need);
+  for (const p of data || []) S.quoted.set(p.id, p);
+  return !!data?.length;
 }
 
 function subscribe() {
@@ -323,6 +344,7 @@ function subscribe() {
       if (p.eventType === "DELETE") removeRow(t, p.old);
       else upsertRow(t, p.new);
       refresh(t);
+      if (t === "posts" && p.new?.reply_to) fetchQuoted().then((got) => { if (got) refresh(t); });
     });
   }
   ch.subscribe((status) => {
@@ -514,6 +536,7 @@ function viewChat(view) {
   view.innerHTML = `
     <div class="msgs" id="msgs" aria-label="Messages"></div>
     <div class="emoji-panel" id="emoji-panel" hidden></div>
+    <div class="compose-ctx" id="compose-ctx" hidden></div>
     <form class="composer" data-form="send">
       <label class="icon-btn" aria-label="Send a photo">${ico("camera")}<input type="file" accept="image/*" hidden data-file="chat"></label>
       <button type="button" class="icon-btn" data-act="send-heart" aria-label="Send a heart">${ico("heart")}</button>
@@ -522,9 +545,10 @@ function viewChat(view) {
       <button class="send" type="submit" aria-label="Send" disabled>${ico("send")}</button>
     </form>`;
   const ta = $("#composer");
-  ta.value = S.draft || "";
+  ta.value = S.editing ? S.editText ?? "" : S.draft || "";
   autosize(ta);
   $(".send").disabled = !ta.value.trim();
+  renderComposeCtx();
   renderMsgs(true);
   bindPress($("#msgs"));
 }
@@ -569,18 +593,51 @@ function msgHTML(p) {
   const body = p.kind === "photo"
     ? `<div class="bubble photo" data-press="${p.id}"><img data-path="${esc(p.body)}" alt="Photo from ${who}" data-zoom="${esc(p.body)}"></div>`
     : `<div class="bubble${emojiOnly(p.body) ? ` emoji n${emojiOnly(p.body)}${/^[\s❤️♥️💖💗💓💕💞💘🩷]+$/u.test(p.body) ? " beat" : ""}` : ""}" data-press="${p.id}">${esc(p.body)}</div>`;
-  return `<div class="m ${mine ? "mine" : ""}">${body}${reactHTML}<div class="meta">${time}</div></div>`;
+  const replyBtn = S.chatV2 ? `<button class="m-reply" data-act="reply" data-id="${p.id}" aria-label="Reply">${ico("reply")}</button>` : "";
+  return `<div class="m ${mine ? "mine" : ""}">${quoteHTML(p)}${body}${reactHTML}<div class="meta">${time}${p.edited_at ? " · Edited" : ""}</div>${replyBtn}</div>`;
 }
 
-// Press and hold a message to react or delete
+const snip = (s, n = 120) => { const t = String(s || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
+const findPost = (id) => S.posts.find((x) => x.id === id) || S.quoted.get(id);
+// The message a reply answers, shown small above it; tap to jump there
+function quoteHTML(p) {
+  const o = p.reply_to && findPost(p.reply_to);
+  if (!o) return "";
+  const who = o.author === S.me.name ? "You" : esc(o.author);
+  const what = o.kind === "photo"
+    ? `<span class="q-photo"><img data-path="${esc(o.body)}" alt="">Photo</span>`
+    : `<span class="q-text">${esc(snip(o.body, 160))}</span>`;
+  return `<button class="quote${o.author === S.me.name ? " me" : ""}" data-act="jump" data-id="${o.id}" aria-label="Reply to ${who}: ${o.kind === "photo" ? "photo" : esc(snip(o.body, 60))}. Show message"><b>${who}</b>${what}</button>`;
+}
+
+// Press and hold a message to react, reply, edit or delete; swipe it to the right to reply
+const SWIPE_AT = 56;
 function bindPress(box) {
   let press = null, suppressClick = false;
-  const cancel = () => { if (press) { clearTimeout(press.t); press.el.classList.remove("pressing"); press = null; } };
+  const settle = (row) => {
+    row.classList.remove("swiping");
+    row.style.transform = "";
+    row.querySelector(".swipe-ico")?.remove();
+  };
+  const cancel = (e) => {
+    if (!press) return;
+    clearTimeout(press.t);
+    press.el.classList.remove("pressing");
+    if (press.row) {
+      settle(press.row);
+      if (press.armed && e?.type === "pointerup") {
+        suppressClick = true;
+        setTimeout(() => { suppressClick = false; }, 400);
+        startReply(press.el.dataset.press);
+      }
+    }
+    press = null;
+  };
   box.addEventListener("pointerdown", (e) => {
     const el = e.target.closest("[data-press]");
     if (!el || e.button > 0) return;
     el.classList.add("pressing");
-    press = { el, x: e.clientX, y: e.clientY, t: setTimeout(() => {
+    press = { el, x: e.clientX, y: e.clientY, touch: e.pointerType !== "mouse", t: setTimeout(() => {
       el.classList.remove("pressing");
       press = null;
       suppressClick = true;
@@ -589,7 +646,28 @@ function bindPress(box) {
       openMsgSheet(el.dataset.press);
     }, 430) };
   });
-  box.addEventListener("pointermove", (e) => { if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) cancel(); });
+  box.addEventListener("pointermove", (e) => {
+    if (!press) return;
+    const dx = e.clientX - press.x, dy = e.clientY - press.y;
+    const sideways = S.chatV2 && press.touch && dx > 0 && Math.abs(dy) < dx * 0.6;
+    if (!press.row && sideways && dx <= 10) return; // too early to tell a swipe from a wobble
+    if (!press.row && sideways) {
+      clearTimeout(press.t);
+      press.el.classList.remove("pressing");
+      press.row = press.el.closest(".m");
+      press.row.classList.add("swiping");
+      press.row.insertAdjacentHTML("afterbegin", `<i class="swipe-ico" aria-hidden="true">${ico("reply")}</i>`);
+    }
+    if (press.row) {
+      const x = Math.max(0, Math.min(dx, SWIPE_AT + 24));
+      press.row.style.transform = `translateX(${x}px)`;
+      press.row.style.setProperty("--pull", Math.min(1, x / SWIPE_AT).toFixed(2));
+      if (x >= SWIPE_AT && !press.armed) { press.armed = true; navigator.vibrate?.(6); }
+      else if (x < SWIPE_AT) press.armed = false;
+      return;
+    }
+    if (Math.hypot(dx, dy) > 10) cancel();
+  });
   ["pointerup", "pointercancel", "pointerleave"].forEach((ev) => box.addEventListener(ev, cancel));
   box.addEventListener("contextmenu", (e) => {
     const el = e.target.closest("[data-press]");
@@ -617,8 +695,12 @@ function openMsgSheet(id) {
     <details class="more-emoji"><summary>More emojis</summary>
       <div class="ep-grid">${[...new Set(EMOJI_SETS.flatMap(([, l]) => l))].map((e) => `<button data-act="react" data-id="${id}" data-emoji="${e}" aria-pressed="${current === e}" aria-label="React with ${e}">${e}</button>`).join("")}</div>
     </details>
+    <div class="msg-actions">
+      ${S.chatV2 ? `<button class="btn soft" data-act="reply" data-id="${id}">${ico("reply")}Reply</button>` : ""}
+      ${S.chatV2 && mine && p.kind === "note" ? `<button class="btn soft" data-act="edit-msg" data-id="${id}">${ico("edit")}Edit</button>` : ""}
+      ${p.kind === "note" ? `<button class="btn soft" data-act="copy-msg" data-id="${id}">${ico("copy")}Copy</button>` : ""}
+    </div>
     <div class="sheet-actions">
-      ${p.kind === "note" ? `<button class="btn soft" data-act="copy-msg" data-id="${id}">${ico("copy")}Copy text</button>` : ""}
       ${mine ? `<button class="btn danger" data-act="del-msg" data-id="${id}">${ico("trash")}Delete message</button>` : ""}
       <button class="btn ghost" data-act="sheet-close">Cancel</button>
     </div>`);
@@ -656,23 +738,126 @@ async function deleteMsg(btn) {
 }
 
 async function sendNote() {
+  if (S.editing) return saveEdit();
   const ta = $("#composer");
   const body = ta.value.trim();
   if (!body) return;
+  const replyTo = S.chatV2 ? S.replyTo : null;
   ta.value = "";
   S.draft = "";
+  S.replyTo = null;
+  renderComposeCtx();
   autosize(ta);
   $(".send").disabled = true;
   try {
-    const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "note", body }).select().single(), "Couldn't send. Check your connection and try again.");
+    const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "note", body, ...(replyTo ? { reply_to: replyTo } : {}) }).select().single(), "Couldn't send. Check your connection and try again.");
     upsertRow("posts", row);
     renderMsgs(true);
     seek("word", body).then((found) => { if (!found) builtInEggs(body, true); });
   } catch (e) {
     ta.value = body;
+    S.draft = body;
+    if (replyTo && !S.editing) { S.replyTo = replyTo; renderComposeCtx(); }
     autosize(ta);
     $(".send").disabled = false;
   }
+}
+
+// ── Replying and editing: a small bar above the message field says which
+function renderComposeCtx() {
+  const box = $("#compose-ctx"), form = $(".composer");
+  if (!box) return;
+  const id = S.editing || S.replyTo;
+  const o = id && findPost(id);
+  const editing = !!(o && S.editing);
+  form?.classList.toggle("editing", editing);
+  $(".send")?.setAttribute("aria-label", editing ? "Save" : "Send");
+  if ($(".send")) $(".send").innerHTML = ico(editing ? "check" : "send");
+  if (!o) { box.hidden = true; box.innerHTML = ""; return; }
+  const who = o.author === S.me.name ? "yourself" : esc(o.author);
+  box.innerHTML = `${ico(editing ? "edit" : "reply")}
+    <div class="cc-text"><b>${editing ? "Edit message" : `Replying to ${who}`}</b><span>${o.kind === "photo" ? "Photo" : esc(snip(o.body, 100))}</span></div>
+    <button type="button" class="icon-btn" data-act="ctx-cancel" aria-label="${editing ? "Cancel editing" : "Cancel reply"}">${ico("close")}</button>`;
+  box.hidden = false;
+}
+
+function startReply(id) {
+  const p = S.posts.find((x) => x.id === id);
+  if (!S.chatV2 || !p || (p.kind !== "note" && p.kind !== "photo")) return;
+  closeSheet();
+  if (S.editing) cancelCtx();
+  S.replyTo = id;
+  renderComposeCtx();
+  $("#composer")?.focus();
+}
+
+function startEdit(id) {
+  const p = S.posts.find((x) => x.id === id);
+  if (!S.chatV2 || !p || p.kind !== "note" || p.author !== S.me.name) return;
+  closeSheet();
+  if (!S.editing) S.draftKeep = $("#composer")?.value ?? S.draft ?? "";
+  S.replyTo = null;
+  S.editing = id;
+  S.editText = p.body;
+  const ta = $("#composer");
+  if (ta) {
+    ta.value = p.body;
+    autosize(ta);
+    $(".send").disabled = false;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+  renderComposeCtx();
+}
+
+function cancelCtx() {
+  const wasEditing = !!S.editing;
+  S.replyTo = null;
+  S.editing = null;
+  S.editText = null;
+  const ta = $("#composer");
+  if (wasEditing) {
+    S.draft = S.draftKeep || "";
+    if (ta) { ta.value = S.draft; autosize(ta); $(".send").disabled = !ta.value.trim(); }
+  }
+  renderComposeCtx();
+}
+
+async function saveEdit() {
+  const ta = $("#composer");
+  const p = S.posts.find((x) => x.id === S.editing);
+  const body = ta.value.trim();
+  if (!p) return cancelCtx();
+  if (!body) return;
+  if (body === p.body) return cancelCtx();
+  const before = { ...p };
+  upsertRow("posts", { ...p, body, edited_at: new Date().toISOString() });
+  cancelCtx();
+  renderMsgs();
+  try {
+    const row = await run(sb.from("posts").update({ body }).eq("id", p.id).select().single(), "Couldn't save the change. Check your connection and try again.");
+    upsertRow("posts", row);
+    renderMsgs();
+  } catch (e) {
+    upsertRow("posts", before);
+    renderMsgs();
+    startEdit(p.id);
+    ta.value = body;
+    S.editText = body;
+    autosize(ta);
+  }
+}
+
+// Tap a quote to see the message it answers (loading earlier messages if needed)
+async function jumpTo(id) {
+  for (let i = 0; i < 10 && !S.posts.some((p) => p.id === id) && S.more; i++) await loadEarlier();
+  const el = $(`#msgs [data-press="${CSS.escape(id)}"]`);
+  if (!el) return toast("That message isn't here anymore");
+  el.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  el.classList.remove("flash");
+  void el.offsetWidth;
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1700);
 }
 
 async function sendHeart() {
@@ -683,12 +868,15 @@ async function sendHeart() {
 }
 
 async function sendPhotos(files) {
+  let replyTo = S.chatV2 && !S.editing ? S.replyTo : null; // a photo can answer a message too (the first one sent does)
+  if (replyTo) { S.replyTo = null; renderComposeCtx(); }
   for (const file of files) {
     S.uploading++;
     renderMsgs(true);
     try {
       const path = await uploadPhoto(file);
-      const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "photo", body: path }).select().single());
+      const row = await run(sb.from("posts").insert({ author: S.me.name, kind: "photo", body: path, ...(replyTo ? { reply_to: replyTo } : {}) }).select().single());
+      replyTo = null;
       upsertRow("posts", row);
     } catch (e) {
       toast("Couldn't send the photo. Check your connection and try again.");
@@ -709,6 +897,7 @@ async function loadEarlier() {
   if (older.length) {
     const rs = await run(sb.from("reactions").select("*").in("post_id", older.map((p) => p.id)));
     for (const r of rs) upsertRow("reactions", r);
+    await fetchQuoted();
   }
   renderMsgs("keep-top");
 }
@@ -1282,7 +1471,8 @@ function addEmoji(e) {
   const pos = a + e.length;
   S.caret = [pos, pos];
   if (focused) ta.setSelectionRange(pos, pos);
-  S.draft = ta.value;
+  if (S.editing) S.editText = ta.value;
+  else S.draft = ta.value;
   autosize(ta);
   $(".send").disabled = !ta.value.trim();
   rememberEmoji(e);
@@ -2170,6 +2360,10 @@ document.addEventListener("click", async (e) => {
       case "earlier": return await loadEarlier();
       case "react": return await react(id, el.dataset.emoji);
       case "copy-msg": closeSheet(); return copyText(S.posts.find((p) => p.id === id)?.body || "");
+      case "reply": return startReply(id);
+      case "edit-msg": return startEdit(id);
+      case "ctx-cancel": cancelCtx(); return $("#composer")?.focus();
+      case "jump": return await jumpTo(id);
       case "del-msg": return await deleteMsg(el);
       case "copy": return copyText(el.dataset.text);
       case "trip-new": return openTripSheet(null);
@@ -2268,7 +2462,8 @@ document.addEventListener("input", (e) => {
   const el = e.target;
   if (el.id) el.dataset.dirty = "1";
   if (el.id === "composer") {
-    S.draft = el.value;
+    if (S.editing) S.editText = el.value;
+    else S.draft = el.value;
     autosize(el);
     $(".send").disabled = !el.value.trim();
   }
@@ -2298,7 +2493,10 @@ document.addEventListener("change", (e) => {
 document.addEventListener("focusout", (e) => { if (e.target.dataset?.plan) savePlan(e.target); });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeSheet();
+  if (e.key === "Escape") {
+    if (!$("#sheet-root .scrim") && (S.replyTo || S.editing)) cancelCtx();
+    closeSheet();
+  }
   if (e.target.id === "composer" && e.key === "Enter" && !e.shiftKey && FINE_POINTER) {
     e.preventDefault();
     sendNote();

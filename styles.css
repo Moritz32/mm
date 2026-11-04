@@ -483,3 +483,52 @@ body[data-theme="love"] .top { background: linear-gradient(135deg, #2A1240 0%, #
 .switch-row input:checked + .switch::after { transform: translateX(20px); }
 .switch-row input:focus-visible + .switch { outline: 2px solid var(--pink); outline-offset: 2px; }
 #quiet-times { padding: 4px 0 12px; }
+
+/* ── Replies and edits ──────────────────────── */
+.msgs { overflow-x: hidden; }
+.m { position: relative; }
+.bubble { touch-action: pan-y; }
+/* the message a reply answers, small and quiet above the bubble */
+.quote {
+  appearance: none; border: 0; cursor: pointer; text-align: left; color: var(--muted);
+  display: grid; gap: 1px; max-width: 100%; margin: 2px 0 3px; padding: 6px 11px 7px 10px;
+  background: var(--surface); border-radius: 14px; box-shadow: inset 3px 0 0 var(--pink);
+  font: 600 13.5px/1.3 var(--round);
+}
+.quote.me { box-shadow: inset 3px 0 0 var(--plum); }
+.quote b { font: 800 12.5px/1.3 var(--round); color: var(--pink); }
+.quote.me b { color: #C9A6E8; }
+.q-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.q-photo { display: inline-flex; align-items: center; gap: 8px; }
+.q-photo img { width: 34px; height: 34px; border-radius: 8px; object-fit: cover; background: var(--surface-3); }
+.quote:active { transform: scale(0.98); }
+.bubble.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 35% { box-shadow: 0 0 0 3px var(--pink); transform: scale(1.03); } 100% { box-shadow: 0 0 0 0 rgba(255, 158, 184, 0); transform: none; } }
+/* swipe right to reply */
+.m.swiping { transition: none; }
+.m:not(.swiping) { transition: transform 0.2s ease-out; }
+.swipe-ico { position: absolute; left: -38px; top: 50%; width: 30px; height: 30px; margin-top: -15px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--pink); opacity: var(--pull, 0); transform: scale(calc(0.6 + var(--pull, 0) * 0.4)); }
+.swipe-ico svg { width: 17px; height: 17px; }
+/* a reply button beside the message when there's a mouse (Mac) */
+.m-reply { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .m-reply { appearance: none; border: 0; cursor: pointer; position: absolute; top: 50%; right: -40px; width: 32px; height: 32px; margin-top: -16px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); opacity: 0; transition: opacity 0.12s; }
+  .m.mine .m-reply { right: auto; left: -40px; }
+  .m:hover .m-reply, .m-reply:focus-visible { opacity: 1; }
+  .m-reply:hover { color: var(--pink); }
+  .m-reply svg { width: 17px; height: 17px; }
+}
+/* the sheet: reply, edit, copy side by side */
+.msg-actions { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 8px; margin-bottom: 8px; }
+.msg-actions:empty { display: none; }
+.msg-actions .btn { flex-direction: column; gap: 5px; padding: 10px 6px; font-size: 14px; border-radius: var(--r-md); min-height: 62px; }
+.msg-actions .btn svg { width: 20px; height: 20px; }
+/* the bar above the message field */
+.compose-ctx { flex: none; display: flex; align-items: center; gap: 10px; border-top: 1px solid var(--line); background: var(--bg); padding: 8px max(6px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); }
+.compose-ctx > svg { width: 18px; height: 18px; color: var(--pink); flex: none; }
+.cc-text { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; padding-left: 10px; box-shadow: inset 3px 0 0 var(--pink); }
+.cc-text b { font: 800 13px/1.3 var(--round); color: var(--pink); }
+.cc-text span { font-size: 14px; line-height: 1.3; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.compose-ctx .icon-btn { width: 36px; height: 36px; }
+.compose-ctx:not([hidden]) + .composer { border-top: 0; }
+.composer.editing label.icon-btn, .composer.editing [data-act="send-heart"] { display: none; }
